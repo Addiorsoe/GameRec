@@ -1,0 +1,7 @@
+[
+  {"name": "player_x", "type": "float", "module": "game.exe", "offsets": ["0x1F00A0", "0x10", "0x40"]},
+  {"name": "player_y", "type": "float", "module": "game.exe", "offsets": ["0x1F00A0", "0x10", "0x44"]},
+  {"name": "player_z", "type": "float", "module": "game.exe", "offsets": ["0x1F00A0", "0x10", "0x48"]},
+  {"name": "hp", "type": "int32", "module": "game.exe", "offset": "0x2233F0"},
+  {"name": "map_id", "type": "uint16", "address": "0x1A2B3C40"}
+]
