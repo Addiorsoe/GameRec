@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import tkinter as tk
+import traceback
+import webbrowser
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from .. import __version__
 from ..build import make_recorders
+from ..env_check import NPCAP_URL, default_output_dir, is_admin, is_windows, npcap_installed, open_folder
 from ..export import export_session
 from ..memory.watcher import WatchEntry
 from ..process import get_target, list_processes
@@ -22,12 +28,14 @@ class App(ttk.Frame):
         self.session: Session | None = None
         self.watch: list[WatchEntry] = []
         self._last_mark = 0.0
-        master.title("GameRec 記憶體 / 封包 / 畫面記錄器")
+        self.last_zip: Path | None = None
+        master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
         self._build()
         self.refresh_processes()
+        self.after(300, self.check_environment)
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -72,6 +80,21 @@ class App(ttk.Frame):
         for i, (lbl, var) in enumerate((("記憶體 Hz", self.v_rate), ("FPS", self.v_fps), ("縮放", self.v_scale))):
             ttk.Label(opt, text=lbl).grid(row=0, column=3 + i * 2, padx=(10, 2))
             ttk.Entry(opt, textvariable=var, width=6).grid(row=0, column=4 + i * 2)
+        self.env_var = tk.StringVar()
+        self.env_label = ttk.Label(opt, textvariable=self.env_var)
+        self.env_label.grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        self.b_npcap = ttk.Button(opt, text="下載 Npcap", command=lambda: webbrowser.open(NPCAP_URL))
+        self.b_npcap.grid(row=1, column=6, columnspan=2, sticky="w", pady=(4, 0))
+        self.b_npcap.grid_remove()
+        ttk.Button(opt, text="重新檢查", command=self.check_environment).grid(row=1, column=8, sticky="w", pady=(4, 0))
+
+        out = ttk.Frame(opt)
+        out.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(4, 0))
+        ttk.Label(out, text="輸出資料夾").pack(side="left")
+        self.out_var = tk.StringVar(value=str(default_output_dir()))
+        ttk.Entry(out, textvariable=self.out_var, width=50).pack(side="left", padx=4, fill="x", expand=True)
+        ttk.Button(out, text="選擇…", command=self.pick_out).pack(side="left")
+        ttk.Button(out, text="開啟", command=lambda: self._open(self.out_var.get())).pack(side="left", padx=2)
 
         ctl = ttk.Frame(self, padding=(0, 6))
         ctl.grid(row=3, column=0, sticky="ew")
@@ -88,6 +111,40 @@ class App(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
         self.master.bind("<F9>", lambda _e: self.mark())
+
+    # ---------------------------------------------------------- environment
+    def check_environment(self) -> None:
+        msgs = []
+        admin = is_admin()
+        has_npcap = npcap_installed()
+        if not admin:
+            msgs.append("⚠ 未以系統管理員執行（讀記憶體可能失敗）")
+        if has_npcap:
+            msgs.append("✓ Npcap 已安裝，可以抓封包")
+            self.b_npcap.grid_remove()
+        else:
+            msgs.append("✗ 未安裝 Npcap：封包功能停用（記憶體與錄影照常）")
+            self.v_net.set(False)
+            self.b_npcap.grid()
+        self.env_var.set("　".join(msgs))
+        if not has_npcap and not getattr(self, "_npcap_prompted", False):
+            self._npcap_prompted = True
+            if messagebox.askyesno(
+                "需要安裝 Npcap",
+                "抓封包需要免費的 Npcap 驅動程式，目前尚未安裝。\n\n"
+                "安裝時請勾選「Install Npcap in WinPcap API-compatible Mode」，\n"
+                "裝好後回到這裡按「重新檢查」即可。\n\n要現在開啟下載頁面嗎？",
+            ):
+                webbrowser.open(NPCAP_URL)
+
+    def pick_out(self) -> None:
+        p = filedialog.askdirectory(initialdir=self.out_var.get())
+        if p:
+            self.out_var.set(p)
+
+    def _open(self, path: str) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        open_folder(path)
 
     # --------------------------------------------------------------- target
     def refresh_processes(self) -> None:
@@ -165,7 +222,12 @@ class App(ttk.Frame):
             self.watch, network=self.v_net.get(), video=self.v_vid.get(), inputs=self.v_inp.get(),
             rate_hz=self.v_rate.get(), fps=self.v_fps.get(), scale=self.v_scale.get(),
         )
-        self.session = Session(target, recs)
+        if self.v_net.get() and not npcap_installed():
+            messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
+        if not recs:
+            messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
+            return
+        self.session = Session(target, recs, root=self.out_var.get())
         for r in recs:  # F9 also works while the game window has focus
             if r.kind == "input":
                 r.on_key = lambda k: k == "f9" and self.master.after(0, self.mark)
@@ -202,7 +264,9 @@ class App(ttk.Frame):
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "normal", "disabled", "disabled"
         summary = "\n".join(f"{k}: {st} ({n})" for k, (st, n) in self.session.stats().items())
         self.status.set(f"已匯出 {zpath}")
-        messagebox.showinfo("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。")
+        self.last_zip = zpath
+        if messagebox.askyesno("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。\n要開啟所在資料夾嗎？"):
+            open_folder(zpath.parent)
 
 
 def _ask_text(master, title: str, prompt: str) -> str | None:
@@ -211,9 +275,45 @@ def _ask_text(master, title: str, prompt: str) -> str | None:
     return simpledialog.askstring(title, prompt, parent=master)
 
 
+def _crash_log() -> Path:
+    p = default_output_dir().parent / "gamerec_error.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def run_gui() -> int:
+    if is_windows():
+        try:  # crisp text on high-DPI screens
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:  # noqa: BLE001
+            pass
     root = tk.Tk()
-    root.geometry("760x560")
-    App(root)
+    root.geometry("860x620")
+
+    def report(exc, val, tb):
+        text = "".join(traceback.format_exception(exc, val, tb))
+        logging.getLogger("gamerec").error(text)
+        try:
+            with open(_crash_log(), "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except OSError:
+            pass
+        messagebox.showerror("發生錯誤", f"{val}\n\n詳細記錄：{_crash_log()}")
+
+    root.report_callback_exception = report
+    app = App(root)
+
+    def on_close():
+        if app.session and app.session.started and not app.session.stopped:
+            if not messagebox.askyesno("離開", "仍在錄製中，要停止並匯出後再離開嗎？\n（選「否」直接離開，資料不會打包）"):
+                app.session.stop()
+                root.destroy()
+                return
+            app.stop()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
     return 0

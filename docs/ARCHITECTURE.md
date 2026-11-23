@@ -131,9 +131,9 @@ logs/recorder.log
 
 ## 6. 打包
 
-- `PyInstaller` 單一資料夾模式（`scripts/build_exe.bat`），產出 `dist/GameRec/GameRec.exe`。
+- `PyInstaller` 單一檔案、無主控台模式（`scripts/build_exe.bat`），產出可直接雙擊的 `dist/GameRec.exe`；GitHub Actions 在 windows-latest 自動建置並發佈到 Releases。
 - 需要系統管理員權限（讀其他程式記憶體、抓封包），exe 內嵌 `uac_admin` manifest。
-- 使用者需自行安裝 **Npcap**（安裝時勾選 WinPcap 相容模式）；沒裝時網路串流會標記為 `unavailable`，其他照常。
+- 使用者需自行安裝 **Npcap**（授權不允許隨附，安裝時勾選 WinPcap 相容模式）；GUI 啟動時偵測，沒裝會跳提示並提供下載按鈕，封包串流自動停用，其他照常。
 
 ## 7. 開發階段
 

@@ -1,0 +1,46 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Smoke test imports (GUI + Windows modules)
+        run: python -c "import gamerec.ui.app, gamerec.memory.scanner, gamerec.net.capture, gamerec.video.recorder, gamerec.inputs.logger, win32gui, pymem, scapy.all, cv2, mss, pynput; print('ok')"
+
+      - name: Build exe
+        run: scripts\build_exe.bat
+        shell: cmd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GameRec-exe
+          path: dist/GameRec.exe
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GameRec.exe

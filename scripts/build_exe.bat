@@ -1,8 +1,11 @@
 @echo off
-REM Build dist\GameRec\GameRec.exe  (run from repo root in a venv with requirements-dev.txt installed)
-pyinstaller --noconfirm --clean --name GameRec --windowed --uac-admin ^
+REM Build a single double-clickable dist\GameRec.exe (GUI, no console, asks for admin).
+REM Run from the repo root in a venv with requirements-dev.txt installed.
+pyinstaller --noconfirm --clean ^
+  --onefile --windowed --uac-admin ^
+  --name GameRec ^
   --collect-submodules scapy --collect-submodules pynput ^
   --hidden-import win32gui --hidden-import win32process ^
   scripts\run_gamerec.py
 echo.
-echo Done: dist\GameRec\GameRec.exe
+echo Done: dist\GameRec.exe
