@@ -97,3 +97,6 @@ class ScreenRecorder(Recorder):
             self._writer.release()
         if getattr(self, "_fh", None):
             self._fh.close()
+        if self.count == 0 and self.status == "running":
+            # an empty video must not be reported as "ok"
+            raise RuntimeError("no frames were captured (screen capture stalled or failed)")
