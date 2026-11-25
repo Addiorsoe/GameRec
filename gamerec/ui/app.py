@@ -345,8 +345,6 @@ class App(ttk.Frame):
             self.watch, network=self.v_net.get(), video=self.v_vid.get(), inputs=self.v_inp.get(),
             rate_hz=rate, fps=fps, scale=scale,
         )
-        if self.v_net.get() and not npcap_installed():
-            messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
         if not recs:
             messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
             return
@@ -360,6 +358,8 @@ class App(ttk.Frame):
                 self.status.set("已取消：請先新增監看位址或匯入 JSON")
                 return
             self._empty_watch_ok = True
+        if self.v_net.get() and not npcap_installed():
+            messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
         group = self.group_var.get().strip()
         take = next_take(self.out_var.get(), group) if group else None
         if self.last_zip is not None and self.notes_var.get() == self._saved_notes:

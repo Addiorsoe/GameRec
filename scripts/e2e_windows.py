@@ -189,6 +189,7 @@ def run_gui() -> None:
     # auto-answer dialogs
     messagebox.askyesno = lambda *a, **k: False
     messagebox.showinfo = lambda *a, **k: None
+    messagebox.showwarning = lambda *a, **k: None  # e.g. "Npcap not installed": a real modal would hang CI
     errors: list[str] = []
     messagebox.showerror = lambda title, msg, **k: errors.append(f"{title}: {msg}")
 
