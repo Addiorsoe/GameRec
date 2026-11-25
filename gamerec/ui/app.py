@@ -13,7 +13,9 @@ from tkinter import filedialog, messagebox, ttk
 from .. import __version__
 from ..build import make_recorders
 from ..env_check import default_output_dir, is_admin, is_windows, npcap_installed, open_folder, run_checks
+from ..hotkeys import FORCE_STOP, HotkeyConfig, GlobalHotkeys, pretty
 from .env_dialog import EnvDialog
+from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry
 from ..process import get_target, list_processes
@@ -31,12 +33,15 @@ class App(ttk.Frame):
         self._last_mark = 0.0
         self.last_zip: Path | None = None
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
+        self._hk_paused = False
+        self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
         self._build()
         self.refresh_processes()
+        self._start_hotkeys()
         self.after(300, self.check_environment)
 
     # ---------------------------------------------------------------- layout
@@ -101,18 +106,21 @@ class App(ttk.Frame):
         ctl = ttk.Frame(self, padding=(0, 6))
         ctl.grid(row=3, column=0, sticky="ew")
         self.b_start = ttk.Button(ctl, text="● 開始", command=self.start)
-        self.b_mark = ttk.Button(ctl, text="加標記 (F9)", command=self.mark, state="disabled")
+        self.b_mark = ttk.Button(ctl, text="加標記", command=self.mark, state="disabled")
         self.b_stop = ttk.Button(ctl, text="■ 停止並匯出", command=self.stop, state="disabled")
         for b in (self.b_start, self.b_mark, self.b_stop):
             b.pack(side="left", padx=2)
+        ttk.Button(ctl, text="熱鍵設定…", command=self.open_hotkeys).pack(side="right", padx=2)
         self.mark_var = tk.StringVar()
         ttk.Entry(ctl, textvariable=self.mark_var, width=24).pack(side="left", padx=4)
+        self.hk_hint = tk.StringVar()
+        ttk.Label(ctl, textvariable=self.hk_hint, foreground="#a00").pack(side="right", padx=6)
         self.status = tk.StringVar(value="就緒")
         ttk.Label(self, textvariable=self.status, foreground="#555").grid(row=4, column=0, sticky="w")
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
-        self.master.bind("<F9>", lambda _e: self.mark())
+        self._label_hotkeys()
 
     # ---------------------------------------------------------- environment
     def check_environment(self, auto_open: bool = True) -> None:
@@ -243,23 +251,52 @@ class App(ttk.Frame):
             messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
             return
         self.session = Session(target, recs, root=self.out_var.get())
-        for r in recs:  # F9 also works while the game window has focus
-            if r.kind == "input":
-                # Called on pynput's thread: never touch tkinter here, hand off via a queue.
-                r.on_key = lambda k: k == "f9" and self._hotkeys.put(k)
         self.session.start()
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "disabled", "normal", "normal"
         self._tick()
+
+    # -------------------------------------------------------------- hotkeys
+    def _start_hotkeys(self) -> None:
+        def fire(action: str) -> None:  # pynput thread: never touch tkinter here
+            if not self._hk_paused or action == "force_stop":
+                self._hotkeys.put(action)
+
+        self._global_hk = GlobalHotkeys(self.hk_config, fire)
+        try:
+            self._global_hk.start()
+        except Exception as e:  # noqa: BLE001 - app still works with buttons
+            logging.getLogger("gamerec").warning("global hotkeys unavailable: %s", e)
         self._poll_hotkeys()
 
     def _poll_hotkeys(self) -> None:
-        s = self.session
-        if not s or s.stopped:
-            return
         while not self._hotkeys.empty():
-            self._hotkeys.get_nowait()
-            self.mark()
+            self.handle_hotkey(self._hotkeys.get_nowait())
         self.after(50, self._poll_hotkeys)
+
+    def handle_hotkey(self, action: str) -> None:
+        recording = bool(self.session and self.session.started and not self.session.stopped)
+        if action == "force_stop":
+            if recording:
+                self.stop(ask=False, notes="（使用強制停止鍵結束）")
+        elif action == "mark" and recording:
+            self.mark()
+        elif action == "start_stop":
+            self.stop() if recording else self.start()
+
+    def _label_hotkeys(self) -> None:
+        b = self.hk_config.bindings
+        self.b_start.configure(text=f"● 開始 ({pretty(b['start_stop'])})")
+        self.b_stop.configure(text=f"■ 停止並匯出 ({pretty(b['start_stop'])})")
+        self.b_mark.configure(text=f"加標記 ({pretty(b['mark'])})")
+        self.hk_hint.set(f"強制停止：{pretty(FORCE_STOP)}（固定）")
+
+    def open_hotkeys(self) -> None:
+        dlg = getattr(self, "_hk_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        self._hk_dlg = HotkeyDialog(self.master, self.hk_config, on_change=self._label_hotkeys,
+                                    on_capture=lambda on: setattr(self, "_hk_paused", on))
 
     def _tick(self) -> None:
         s = self.session
@@ -280,18 +317,20 @@ class App(ttk.Frame):
             self.mark_var.set("")
             self.status.set(f"已加標記 @ {m['t_ns'] / 1e9:.2f}s：{m['label']}")
 
-    def stop(self) -> None:
-        if not self.session:
+    def stop(self, ask: bool = True, notes: str = "") -> None:
+        """Stop and export. ask=False (force-stop key) skips every dialog."""
+        if not self.session or self.session.stopped:
             return
         self.status.set("停止中，正在匯出…")
         self.update_idletasks()
-        notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）")
-        zpath = export_session(self.session, notes=notes or "")
+        if ask:
+            notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）") or ""
+        zpath = export_session(self.session, notes=notes)
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "normal", "disabled", "disabled"
         summary = "\n".join(f"{k}: {st} ({n})" for k, (st, n) in self.session.stats().items())
         self.status.set(f"已匯出 {zpath}")
         self.last_zip = zpath
-        if messagebox.askyesno("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。\n要開啟所在資料夾嗎？"):
+        if ask and messagebox.askyesno("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。\n要開啟所在資料夾嗎？"):
             open_folder(zpath.parent)
 
 
@@ -362,10 +401,13 @@ def _arm_smoke(root, app, smoke_file: str) -> None:
 
             for mod in ("cv2", "mss", "numpy", "psutil", "pymem", "pynput.keyboard", "scapy.all",
                         "gamerec.memory.scanner", "gamerec.net.capture", "gamerec.video.recorder",
-                        "gamerec.inputs.logger"):
+                        "gamerec.inputs.logger", "gamerec.env_check", "gamerec.ui.env_dialog",
+                        "gamerec.hotkeys", "gamerec.ui.hotkey_dialog"):
                 importlib.import_module(mod)
             info["processes"] = len(app.proc_box["values"])
             info["env"] = {c.key: c.ok for c in run_checks()}
+            info["env_fixes"] = [c.fix_label for c in run_checks() if c.fix_label]  # one-click installer bundled
+            info["hotkeys"] = app.hk_config.bindings
         except Exception as e:  # noqa: BLE001
             info = {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()}
         with open(smoke_file, "w", encoding="utf-8") as f:

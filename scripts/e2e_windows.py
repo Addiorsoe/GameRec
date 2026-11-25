@@ -129,6 +129,23 @@ def verify(zpath: Path, expect_markers: int = 0) -> None:
     if "logs/recorder.log" not in names:
         problems.append("log missing")
 
+    # readability: every text file must parse and show sample rows a human can read
+    print("\n--- readability samples ---")
+    if "README.txt" not in names:
+        problems.append("README.txt missing from export")
+    for name in ("memory/samples.csv", "input/events.jsonl", "network/packets.jsonl", "markers.jsonl", "video/frames.csv"):
+        if name in names:
+            lines = z.read(name).decode("utf-8").splitlines()
+            print(f"[{name}] {len(lines)} lines")
+            for line in lines[:3]:
+                print("   ", line[:200])
+            if name.endswith(".jsonl"):
+                for line in lines:
+                    rec = json.loads(line)
+                    if "t_ns" not in rec:
+                        problems.append(f"{name}: row without t_ns")
+                        break
+
     if problems:
         print("\nFAILED:\n - " + "\n - ".join(problems))
         print(z.read("logs/recorder.log").decode(errors="replace")[-3000:])
@@ -197,14 +214,42 @@ def run_gui() -> None:
         a.mark_var.set("walk north")
         a.mark()
 
-    def step_stop():
-        a.stop()
+    def press_combo(*keys):
+        def go():
+            from pynput.keyboard import Controller, Key
+
+            kb = Controller()
+            ks = [getattr(Key, k) if len(k) > 1 else k for k in keys]
+            for k in ks:
+                kb.press(k)
+            time.sleep(0.05)
+            for k in reversed(ks):
+                kb.release(k)
+        threading.Thread(target=go, daemon=True).start()
+
+    def step_hotkey_mark():  # default mark hotkey F9 via the global hook
+        press_combo("f9")
+
+    def step_force_stop():  # fixed force-stop combo must stop + export without dialogs
+        press_combo("ctrl", "alt", "end")
+
+    def step_check():
         result["zip"] = a.last_zip
+        result["stopped"] = bool(a.session and a.session.stopped)
         root.destroy()
+
+    # hotkey validation from the GUI side
+    try:
+        a.hk_config.set("mark", a.hk_config.bindings["start_stop"])
+        errors.append("duplicate hotkey was accepted")
+    except ValueError:
+        pass
 
     root.after(1000, step_start)
     root.after(4000, step_mark)
-    root.after(1000 + SECONDS * 1000, step_stop)
+    root.after(5500, step_hotkey_mark)
+    root.after(1000 + SECONDS * 1000, step_force_stop)
+    root.after(4000 + SECONDS * 1000, step_check)
     root.after(60_000, root.destroy)
     root.mainloop()
     stop.set()
@@ -212,8 +257,12 @@ def run_gui() -> None:
     if errors:
         raise SystemExit(f"GUI showed errors: {errors}")
     if not result.get("zip"):
-        raise SystemExit("GUI did not export a zip")
-    verify(Path(result["zip"]), expect_markers=1)
+        raise SystemExit("GUI did not export a zip (force-stop hotkey not handled?)")
+    verify(Path(result["zip"]), expect_markers=2)
+    man = json.loads(zipfile.ZipFile(result["zip"]).read("manifest.json"))
+    if "強制停止" not in man.get("notes", ""):
+        raise SystemExit(f"export was not made by the force-stop key: notes={man.get('notes')!r}")
+    print("hotkeys OK (F9 marker + Ctrl+Alt+End force stop)")
 
 
 def _diagnose() -> None:

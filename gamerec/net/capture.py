@@ -109,6 +109,8 @@ class PacketCapture(Recorder):
             "dst": ip.dst, "dport": l4.dport,
             "len": len(payload),
             "payload_hex": payload[: self.max_payload].hex(),
+            # quick human preview: printable ASCII kept, everything else shown as '.'
+            "payload_ascii": "".join(chr(b) if 32 <= b < 127 else "." for b in payload[:96]),
         }
         if proto == "tcp":
             rec["flags"] = str(l4.flags)

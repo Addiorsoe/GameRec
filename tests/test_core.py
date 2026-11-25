@@ -158,6 +158,9 @@ def _run_capture(tmp_path, monkeypatch, fail_always):
 
     monkeypatch.setattr(_FakeSniffer, "fail_always", fail_always)
     monkeypatch.setattr(scapy.all, "AsyncSniffer", _FakeSniffer)
+    import gamerec.net.capture as cap
+
+    monkeypatch.setattr(cap, "_npcap_installed", lambda: True)  # CI runners have no Npcap
     pc = PacketCapture(ports_fn=lambda pid: set())
     s = Session(TARGET, [pc], root=tmp_path)
     s.start()
