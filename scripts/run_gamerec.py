@@ -8,6 +8,7 @@ import sys
 import gamerec.cli
 import gamerec.env_check  # noqa: F401
 import gamerec.sysinfo  # noqa: F401
+import gamerec.ui.finder_dialog  # noqa: F401
 import gamerec.hotkeys  # noqa: F401
 import gamerec.inputs.logger  # noqa: F401
 import gamerec.memory.scanner  # noqa: F401

@@ -43,6 +43,10 @@ jobs:
         timeout-minutes: 5
         run: python scripts/e2e_windows.py gui
 
+      - name: E2E coordinate finder (reads a real second process)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py finder
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:

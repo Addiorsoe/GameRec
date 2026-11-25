@@ -202,3 +202,13 @@ def test_lost_key_up_does_not_kill_hotkey(monkeypatch):
     assert t.down("f9") == "f9"        # key-up never arrives
     now[0] += 2.0
     assert t.down("f9") == "f9"        # next real press still works
+
+
+def test_manifest_lists_missing_streams(tmp_path):
+    # Before: an empty watch list simply left "memory" out of the manifest, with no explanation.
+    s = Session(TARGET, [], root=tmp_path)
+    s.start()
+    s.stop()
+    man = json.loads(zipfile.ZipFile(export_session(s)).read("manifest.json"))
+    st = {x["kind"]: x["status"] for x in man["streams"]}
+    assert st == {"memory": "not_configured", "network": "disabled", "video": "disabled", "input": "disabled"}

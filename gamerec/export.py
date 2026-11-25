@@ -16,6 +16,25 @@ FORMAT_VERSION = 1
 _STORED = {".mp4", ".zip", ".png", ".jpg"}
 
 
+ALL_KINDS = ("memory", "network", "video", "input")
+
+
+def _streams(session: Session) -> list[dict]:
+    """Every stream is listed, so a missing one is explicit instead of silently absent."""
+    out = [r.describe() for r in session.recorders]
+    have = {d["kind"] for d in out}
+    for kind in ALL_KINDS:
+        if kind in have:
+            continue
+        if kind == "memory":
+            out.append({"kind": kind, "status": "not_configured", "files": [], "count": 0,
+                        "error": "watch list was empty: no memory values were recorded"})
+        else:
+            out.append({"kind": kind, "status": "disabled", "files": [], "count": 0,
+                        "error": "not selected for this recording"})
+    return out
+
+
 def build_manifest(session: Session) -> dict:
     assert session.clock is not None
     return {
@@ -26,7 +45,7 @@ def build_manifest(session: Session) -> dict:
         "duration_s": round(session.duration_ns / 1e9, 3),
         "clock": session.clock.to_dict(),
         "target": getattr(session, "target_snapshot", None) or session.target.to_dict(),
-        "streams": [r.describe() for r in session.recorders],
+        "streams": _streams(session),
         "markers": len(session.markers),
         "group": getattr(session, "group", "") or None,
         "take": getattr(session, "take", None),
