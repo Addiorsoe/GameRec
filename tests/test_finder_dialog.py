@@ -45,9 +45,10 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
 
     def follow_prompts():                            # the "player": walks when told to
         mem.walking = "繞著走" in dlg.prompt.get()
-        if dlg.b_start["state"] == "normal" and dlg.scanner and dlg.scanner.history and "found" not in result:
+        if dlg.finished and "found" not in result:
             result["found"] = {a for a, _ in dlg.scanner.results()}
             result["prompt"] = dlg.prompt.get()
+            result["finished"] = dlg.finished
             dlg.add_all()
             root.after(300, root.destroy)
             return
@@ -61,7 +62,7 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     found = result.get("found", set())
     assert {mem.addr(mem.px), mem.addr(mem.py)} <= found, result
     assert mem.addr(mem.timer) not in found and mem.addr(mem.pz) not in found
-    assert "候選" in result["prompt"]
+    assert result["finished"] == "done" and "候選" in result["prompt"]
     names = [w.name for w in app.watch]
     assert names[:2] == ["cand_001", "cand_002"] and all(w.type == "float" for w in app.watch)
     report = json.loads(next(tmp_path.glob("finder_*_game.exe.json")).read_text(encoding="utf-8"))

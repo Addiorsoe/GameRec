@@ -49,6 +49,7 @@ class FinderDialog(tk.Toplevel):
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._rows: list[int] = []
+        self.finished = ""  # last outcome: done | stopped | error
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(100, self._poll)
@@ -199,6 +200,7 @@ class FinderDialog(tk.Toplevel):
             pass
 
     def _finish(self, kind: str, err: str = "") -> None:
+        self.finished = kind
         self._set_busy(False)
         _beep()
         n = self.scanner.count if self.scanner else 0
