@@ -451,7 +451,7 @@ steps:
 on_fail:
   map_ui_open: retry_then_stop
   timeout:     leave_map
-  player_died: respawn_then_restart   # 記錄點重生後從第一步重來（覆蓋上方 stop）
+  player_died: respawn_then_restart   # 記錄點重生後從第一步重來
   game_crashed: relaunch_then_restart
 ```
 
