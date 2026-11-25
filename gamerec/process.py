@@ -50,6 +50,30 @@ def find_target_by_name(name: str) -> TargetInfo:
     raise LookupError(f"process not found: {name}")
 
 
+def target_from_foreground() -> TargetInfo | None:
+    """The process that owns the window the user is looking at right now (Windows only)."""
+    if sys.platform != "win32":
+        return None
+    import win32gui
+
+    hwnd = win32gui.GetForegroundWindow()
+    return target_from_hwnd(hwnd) if hwnd else None
+
+
+def target_from_hwnd(hwnd: int) -> TargetInfo:
+    import psutil
+    import win32gui
+    import win32process
+
+    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    p = psutil.Process(pid)
+    try:
+        exe = p.exe()
+    except (psutil.AccessDenied, psutil.ZombieProcess):
+        exe = ""
+    return TargetInfo(pid=pid, name=p.name(), exe=exe, window_title=win32gui.GetWindowText(hwnd), hwnd=hwnd)
+
+
 def find_main_window(pid: int) -> tuple[int, str]:
     """Return (hwnd, title) of the largest visible window owned by pid."""
     if sys.platform != "win32":

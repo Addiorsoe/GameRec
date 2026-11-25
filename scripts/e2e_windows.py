@@ -193,11 +193,10 @@ def run_gui() -> None:
     messagebox.showerror = lambda title, msg, **k: errors.append(f"{title}: {msg}")
 
     root = tk.Tk()
+    root.geometry("860x640+700+0")
     a = appmod.App(root)
     a.out_var.set(str(tmp / "sessions"))
     a.refresh_processes()
-    entry = next(v for v in a.proc_box["values"] if v.endswith(f"[{info['pid']}]"))
-    a.proc_var.set(entry)
     for name, vtype, where in (
         ("counter", "int32", hex(info["counter"])),
         ("hp", "int32", hex(info["hp"])),
@@ -233,6 +232,38 @@ def run_gui() -> None:
     def step_force_stop():  # fixed force-stop combo must stop + export without dialogs
         press_combo("ctrl", "alt", "end")
 
+    def step_focus_target():  # bring the fake game to the front, then press the lock hotkey (F8)
+        import win32con
+        import win32gui
+
+        from gamerec.process import find_main_window
+
+        hwnd, _ = find_main_window(info["pid"])
+        press_combo("alt")  # Windows only lets a process steal focus right after a key event
+        time.sleep(0.2)
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"could not focus target: {e}")
+        root.after(500, lambda: press_combo("f8"))
+
+    def step_check_lock():
+        if not a.locked or a.locked.pid != info["pid"]:
+            errors.append(f"lock hotkey did not lock the target: {a.locked}")
+        else:
+            print(f"lock OK: {a.locked.name} [{a.locked.pid}] window={a.locked.window_title!r}")
+
+    def screenshot(name):
+        import mss
+        import mss.tools
+
+        out = ROOT / "e2e-artifacts" / "screens"
+        out.mkdir(parents=True, exist_ok=True)
+        with mss.mss() as sct:
+            img = sct.grab(sct.monitors[1])
+            mss.tools.to_png(img.rgb, img.size, output=str(out / name))
+
     def step_check():
         result["zip"] = a.last_zip
         result["stopped"] = bool(a.session and a.session.stopped)
@@ -251,8 +282,10 @@ def run_gui() -> None:
             delay, fn = steps[0]
             root.after(delay, lambda: (fn(), chain(steps[1:])))
 
-    chain([(1000, step_start), (1500, step_mark), (1500, step_hotkey_mark),
-           (SECONDS * 1000, step_force_stop), (3000, step_check)])
+    chain([(1000, step_focus_target), (1500, step_check_lock), (300, lambda: screenshot("1_locked.png")),
+           (500, step_start), (1500, step_mark), (1500, step_hotkey_mark),
+           (1500, lambda: screenshot("2_recording.png")),
+           (SECONDS * 1000, step_force_stop), (3000, lambda: screenshot("3_exported.png")), (200, step_check)])
     root.after(60_000, root.destroy)
     root.mainloop()
     stop.set()
@@ -265,7 +298,9 @@ def run_gui() -> None:
     man = json.loads(zipfile.ZipFile(result["zip"]).read("manifest.json"))
     if "強制停止" not in man.get("notes", ""):
         raise SystemExit(f"export was not made by the force-stop key: notes={man.get('notes')!r}")
-    print("hotkeys OK (F9 marker + Ctrl+Alt+End force stop)")
+    if man["target"].get("window_title") != "E2E Target Game":
+        raise SystemExit(f"locked target window not used: {man['target']}")
+    print("hotkeys OK (F8 lock target + F9 marker + Ctrl+Alt+End force stop)")
 
 
 def _diagnose() -> None:

@@ -27,6 +27,7 @@ class Action:
 
 
 GAMEREC_ACTIONS = (
+    Action("lock_target", "鎖定目前視窗為目標", "f8"),
     Action("start_stop", "開始 / 停止錄製", "f10"),
     Action("mark", "加標記", "f9"),
 )

@@ -18,7 +18,7 @@ from .env_dialog import EnvDialog
 from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry
-from ..process import get_target, list_processes
+from ..process import TargetInfo, get_target, list_processes, target_from_foreground
 from ..session import Session
 
 TYPES = ["int32", "uint32", "int16", "int64", "float", "double", "uint8", "bytes:16"]
@@ -34,6 +34,7 @@ class App(ttk.Frame):
         self.last_zip: Path | None = None
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
         self._hk_paused = False
+        self.locked: TargetInfo | None = None  # set by the lock-target hotkey
         self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
         self.grid(sticky="nsew")
@@ -52,6 +53,9 @@ class App(ttk.Frame):
         self.proc_box = ttk.Combobox(tgt, textvariable=self.proc_var, width=50)
         self.proc_box.grid(row=0, column=0, sticky="ew")
         ttk.Button(tgt, text="重新整理", command=self.refresh_processes).grid(row=0, column=1, padx=4)
+        self.lock_var = tk.StringVar()
+        ttk.Label(tgt, textvariable=self.lock_var, foreground="#0a6").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.proc_box.bind("<<ComboboxSelected>>", lambda _e: self.unlock())
         tgt.columnconfigure(0, weight=1)
 
         mem = ttk.LabelFrame(self, text="記憶體監看清單", padding=6)
@@ -164,6 +168,38 @@ class App(ttk.Frame):
         except Exception as e:  # noqa: BLE001
             self.status.set(f"無法列出程式：{e}")
 
+    def lock_foreground(self) -> None:
+        """Lock the target to the window that currently has focus (hotkey)."""
+        if self.session and self.session.started and not self.session.stopped:
+            self.status.set("錄製中不能更換目標")
+            return
+        t = target_from_foreground()
+        if t is None:
+            self.status.set("無法取得目前視窗（只支援 Windows）")
+            return
+        import os
+
+        if t.pid == os.getpid():
+            self.status.set(f"請先點一下遊戲視窗，再按 {pretty(self.hk_config.bindings['lock_target'])}")
+            return
+        self.locked = t
+        self.proc_var.set(f"{t.name}  [{t.pid}]")
+        self.lock_var.set(f"🔒 已鎖定：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
+        self.status.set(f"已鎖定 {t.name}")
+        try:
+            self.master.bell()
+        except tk.TclError:
+            pass
+
+    def unlock(self) -> None:
+        self.locked = None
+        self._lock_hint()
+
+    def _lock_hint(self) -> None:
+        if not self.locked:
+            self.lock_var.set(f"建議：切到遊戲視窗按 {pretty(self.hk_config.bindings['lock_target'])} 鎖定目標，"
+                              "避免抓到錯誤的程式（下拉選單會自動猜視窗，可能不準）")
+
     def _pid(self) -> int:
         s = self.proc_var.get()
         if "[" not in s:
@@ -230,7 +266,7 @@ class App(ttk.Frame):
     # -------------------------------------------------------------- session
     def start(self) -> None:
         try:
-            target = get_target(self._pid())
+            target = self.locked or get_target(self._pid())
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("無法開始", str(e))
             return
@@ -280,6 +316,8 @@ class App(ttk.Frame):
                 self.stop(ask=False, notes="（使用強制停止鍵結束）")
         elif action == "mark" and recording:
             self.mark()
+        elif action == "lock_target" and not recording:
+            self.lock_foreground()
         elif action == "start_stop":
             self.stop() if recording else self.start()
 
@@ -288,7 +326,8 @@ class App(ttk.Frame):
         self.b_start.configure(text=f"● 開始 ({pretty(b['start_stop'])})")
         self.b_stop.configure(text=f"■ 停止並匯出 ({pretty(b['start_stop'])})")
         self.b_mark.configure(text=f"加標記 ({pretty(b['mark'])})")
-        self.hk_hint.set(f"強制停止：{pretty(FORCE_STOP)}（固定）")
+        self.hk_hint.set(f"鎖定目標：{pretty(b['lock_target'])}　強制停止：{pretty(FORCE_STOP)}（固定）")
+        self._lock_hint()
 
     def open_hotkeys(self) -> None:
         dlg = getattr(self, "_hk_dlg", None)
