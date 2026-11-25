@@ -48,7 +48,11 @@ class WatchEntry:
 
 def load_watchlist(path) -> list[WatchEntry]:
     with open(path, encoding="utf-8") as f:
-        return [WatchEntry.from_dict(d) for d in json.load(f)]
+        entries = [WatchEntry.from_dict(d) for d in json.load(f)]
+    names = [e.name for e in entries]
+    if len(set(names)) != len(names):
+        raise ValueError("watch list has duplicate names")
+    return entries
 
 
 class MemoryReader:
@@ -106,6 +110,10 @@ class MemoryWatcher(Recorder):
 
     def __init__(self, entries: list[WatchEntry], rate_hz: float = 30.0, reader_factory=None) -> None:
         super().__init__()
+        names = [e.name for e in entries]
+        dup = {n for n in names if names.count(n) > 1}
+        if dup:  # samples.csv is keyed by name; duplicates would mix two addresses
+            raise ValueError(f"duplicate watch names: {sorted(dup)}")
         self.entries = entries
         self.rate_hz = rate_hz
         self.extra = {"rate_hz": rate_hz}
@@ -138,12 +146,12 @@ class MemoryWatcher(Recorder):
                         e.resolved = resolve(e, self.reader)
                     except Exception:  # noqa: BLE001
                         e.resolved = None
-                if e.resolved is None:
-                    continue
-                try:
-                    v = decode(e.type, self.reader.read(e.resolved, size_of(e.type)))
-                except Exception:  # noqa: BLE001 - unreadable this tick
-                    v = None
+                v = None  # written as "" = unreadable (never repeat the last good value)
+                if e.resolved is not None:
+                    try:
+                        v = decode(e.type, self.reader.read(e.resolved, size_of(e.type)))
+                    except Exception:  # noqa: BLE001 - unreadable this tick
+                        v = None
                 # Write only on change to keep files small (first sample always written).
                 if e.name not in last or last[e.name] != v:
                     self._csv.writerow([t, e.name, "" if v is None else v])

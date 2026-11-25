@@ -17,7 +17,7 @@ from ..hotkeys import FORCE_STOP, HotkeyConfig, GlobalHotkeys, pretty
 from .env_dialog import EnvDialog
 from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
-from ..memory.watcher import WatchEntry
+from ..memory.watcher import WatchEntry, load_watchlist
 from ..process import TargetInfo, get_target, list_processes, target_from_foreground
 from ..session import Session
 
@@ -34,6 +34,7 @@ class App(ttk.Frame):
         self.last_zip: Path | None = None
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
         self._hk_paused = False
+        self._busy = False  # True while starting/stopping: hotkeys must not re-enter
         self.locked: TargetInfo | None = None  # set by the lock-target hotkey
         self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
@@ -239,6 +240,8 @@ class App(ttk.Frame):
     def add_watch(self) -> None:
         try:
             name = self.e_name.get().strip() or f"v{len(self.watch) + 1}"
+            if any(w.name == name for w in self.watch):
+                raise ValueError(f"名稱「{name}」已存在，請換一個（同名會讓資料混在一起）")
             self.watch.append(self.parse_where(name, self.e_type.get(), self.e_addr.get()))
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("位址格式錯誤", str(e))
@@ -253,8 +256,11 @@ class App(ttk.Frame):
     def load_watch(self) -> None:
         p = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
         if p:
-            with open(p, encoding="utf-8") as f:
-                self.watch = [WatchEntry.from_dict(d) for d in json.load(f)]
+            try:
+                self.watch = load_watchlist(p)
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror("無法匯入", str(e))
+                return
             self._redraw()
 
     def save_watch(self) -> None:
@@ -265,6 +271,19 @@ class App(ttk.Frame):
 
     # -------------------------------------------------------------- session
     def start(self) -> None:
+        if self._busy or (self.session and self.session.started and not self.session.stopped):
+            return
+        if self.locked:
+            import psutil
+
+            try:
+                alive = psutil.Process(self.locked.pid).name() == self.locked.name
+            except psutil.Error:
+                alive = False
+            if not alive:  # the pid may now belong to a different program
+                self.unlock()
+                messagebox.showerror("無法開始", "鎖定的程式已經關閉，請重新切到遊戲視窗按鎖定熱鍵。")
+                return
         try:
             target = self.locked or get_target(self._pid())
         except Exception as e:  # noqa: BLE001
@@ -305,11 +324,15 @@ class App(ttk.Frame):
         self._poll_hotkeys()
 
     def _poll_hotkeys(self) -> None:
-        while not self._hotkeys.empty():
-            self.handle_hotkey(self._hotkeys.get_nowait())
-        self.after(50, self._poll_hotkeys)
+        try:
+            while not self._hotkeys.empty():
+                self.handle_hotkey(self._hotkeys.get_nowait())
+        finally:  # an error in one action must not silently kill hotkeys for the rest of the run
+            self.after(50, self._poll_hotkeys)
 
     def handle_hotkey(self, action: str) -> None:
+        if self._busy:  # a stop/export dialog is open: ignore (prevents nested stop/start)
+            return
         recording = bool(self.session and self.session.started and not self.session.stopped)
         if action == "force_stop":
             if recording:
@@ -358,13 +381,19 @@ class App(ttk.Frame):
 
     def stop(self, ask: bool = True, notes: str = "") -> None:
         """Stop and export. ask=False (force-stop key) skips every dialog."""
-        if not self.session or self.session.stopped:
+        if self._busy or not self.session or self.session.stopped:
             return
-        self.status.set("停止中，正在匯出…")
-        self.update_idletasks()
-        if ask:
-            notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）") or ""
-        zpath = export_session(self.session, notes=notes)
+        self._busy = True
+        try:
+            # stop recording first: typing the notes must not end up in the recording
+            self.session.stop()
+            self.status.set("已停止，正在匯出…")
+            self.update_idletasks()
+            if ask:
+                notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）") or ""
+            zpath = export_session(self.session, notes=notes)
+        finally:
+            self._busy = False
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "normal", "disabled", "disabled"
         summary = "\n".join(f"{k}: {st} ({n})" for k, (st, n) in self.session.stats().items())
         self.status.set(f"已匯出 {zpath}")
@@ -396,6 +425,8 @@ def run_gui(smoke_file: str | None = None) -> int:
     root = tk.Tk()
     root.geometry("860x620")
 
+    last_dialog = [0.0]
+
     def report(exc, val, tb):
         text = "".join(traceback.format_exception(exc, val, tb))
         if smoke_file:  # never block a packaging check on a modal dialog
@@ -409,7 +440,15 @@ def run_gui(smoke_file: str | None = None) -> int:
                 f.write(text + "\n")
         except OSError:
             pass
-        messagebox.showerror("發生錯誤", f"{val}\n\n詳細記錄：{_crash_log()}")
+        # one dialog at a time, at most every 5 s: a repeating error must not flood the screen
+        now = time.monotonic()
+        if now - last_dialog[0] < 5:
+            return
+        last_dialog[0] = float("inf")
+        try:
+            messagebox.showerror("發生錯誤", f"{val}\n\n詳細記錄：{_crash_log()}")
+        finally:
+            last_dialog[0] = time.monotonic()
 
     root.report_callback_exception = report
     app = App(root)

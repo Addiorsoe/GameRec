@@ -34,10 +34,10 @@ def build_manifest(session: Session) -> dict:
             "memory/samples.csv": "t_ns,name,value - written on change only; value empty = unreadable",
             "memory/watchlist.json": "watched addresses incl. resolved absolute address",
             "network/capture.pcap": "raw packets (open with Wireshark)",
-            "network/packets.jsonl": "{t_ns, dir(out|in), proto, src, sport, dst, dport, len, payload_hex, payload_ascii(preview)}",
+            "network/packets.jsonl": "{t_ns, dir(out|in), proto, src, sport, dst, dport, len, payload_hex, payload_ascii(preview)} - arrival order, sort by t_ns",
             "video/screen.mp4": "window recording",
-            "video/frames.csv": "frame,t_ns,left,top,width,height - map frames to the timeline",
-            "input/events.jsonl": "{t_ns, kind, key|x,y,button...}",
+            "video/frames.csv": "frame,t_ns,left,top,width,height,source(window|screen|region),dup(1=repeated frame to keep real time)",
+            "input/events.jsonl": "{t_ns, kind, key|x,y,button..., repeat(true=OS auto-repeat while held)}",
             "logs/recorder.log": "tool log",
         },
     }
@@ -54,10 +54,13 @@ markers.jsonl          使用者標記  {"t_ns", "label"}
 memory/samples.csv     記憶體數值  t_ns,name,value（只在數值改變時記錄；空白=讀不到）
 memory/watchlist.json  監看位址清單（含實際解析出的位址 resolved）
 network/packets.jsonl  每個封包一行 {"t_ns","dir":"out送出|in收到","proto","src","sport","dst","dport","len","payload_hex","payload_ascii"}
+                       依抓到的順序寫入（新連線的前幾個封包會稍晚寫入），分析時請依 t_ns 排序
 network/capture.pcap   原始封包，可用 Wireshark 開啟
 video/screen.mp4       視窗錄影
-video/frames.csv       frame,t_ns,left,top,width,height（第幾幀對應哪個時間點）
+video/frames.csv       frame,t_ns,left,top,width,height,source,dup（第幾幀對應哪個時間點）
+                       source：window=遊戲視窗、screen=找不到視窗改錄整個螢幕；dup=1 表示重複上一幀（擷取來不及時補幀，讓影片時間等於真實時間）
 input/events.jsonl     鍵盤滑鼠 {"t_ns","kind":"key_down|key_up|mouse_move|mouse_down|mouse_up|scroll",...}
+                       "repeat":true 表示按住不放時系統自動重複的按鍵，不是新的一次按下
                        滑鼠 x,y 為螢幕座標；減去 manifest.target.window_rect 的左上角即為視窗內座標
 logs/recorder.log      工具執行紀錄（出錯時看這裡）
 """

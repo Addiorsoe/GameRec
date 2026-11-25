@@ -113,19 +113,29 @@ def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     return x, y, r - l, b - t
 
 
-def local_ports(pid: int) -> set[tuple[str, int]]:
-    """Set of (proto, local_port) currently used by pid. proto is 'tcp' or 'udp'."""
+def _norm_ip(ip: str) -> str:
+    ip = ip.split("%", 1)[0]               # drop IPv6 scope id
+    return ip[7:] if ip.startswith("::ffff:") else ip
+
+
+def local_endpoints(pid: int) -> set[tuple[str, str, int]]:
+    """(proto, local_ip, local_port) of every socket pid owns. Raises psutil.NoSuchProcess if gone."""
     import socket
 
     import psutil
 
-    ports: set[tuple[str, int]] = set()
-    try:
-        conns = psutil.Process(pid).net_connections(kind="inet")
-    except AttributeError:  # psutil < 6
-        conns = psutil.Process(pid).connections(kind="inet")
+    proc = psutil.Process(pid)
+    conns = proc.net_connections(kind="inet") if hasattr(proc, "net_connections") else proc.connections(kind="inet")
+    out: set[tuple[str, str, int]] = set()
     for c in conns:
         if c.laddr:
             proto = "tcp" if c.type == socket.SOCK_STREAM else "udp"
-            ports.add((proto, c.laddr.port))
-    return ports
+            out.add((proto, _norm_ip(c.laddr.ip), c.laddr.port))
+    return out
+
+
+def machine_ips() -> set[str]:
+    import psutil
+
+    return {_norm_ip(a.address) for addrs in psutil.net_if_addrs().values() for a in addrs
+            if a.family.name in ("AF_INET", "AF_INET6")}

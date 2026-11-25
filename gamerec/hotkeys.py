@@ -124,21 +124,42 @@ def pynput_key_name(key) -> str:
 
 
 class ComboTracker:
-    """Feed key down/up names; returns the completed combo string on a main-key press."""
+    """Feed key down/up names; returns the completed combo string on a main-key press.
 
-    def __init__(self) -> None:
+    `modifier_down(mod)` asks the OS whether a modifier is really held, so a missed key-up
+    (e.g. a UAC prompt swallowed it) can't leave Ctrl "stuck" and turn Alt+End into the
+    force-stop combo.
+    """
+
+    def __init__(self, modifier_down: Callable[[str], bool] | None = None) -> None:
         self.held: set[str] = set()
+        self.modifier_down = modifier_down
 
     def down(self, name: str) -> str | None:
         name = canon_key(name)
         if name in MODIFIERS:
             self.held.add(name)
             return None
+        if self.modifier_down:
+            self.held = {m for m in self.held if self.modifier_down(m)}
         mods = sorted(self.held, key=MODIFIERS.index)
         return "+".join([*mods, name])
 
     def up(self, name: str) -> None:
         self.held.discard(canon_key(name))
+
+
+def _os_modifier_down():
+    """Windows: GetAsyncKeyState-based check of the real modifier state; None elsewhere."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    vks = {"ctrl": (0x11,), "alt": (0x12,), "shift": (0x10,), "win": (0x5B, 0x5C)}
+    gaks = ctypes.windll.user32.GetAsyncKeyState
+    return lambda m: any(gaks(vk) & 0x8000 for vk in vks[m])
 
 
 class GlobalHotkeys:
@@ -150,7 +171,7 @@ class GlobalHotkeys:
     def __init__(self, config: HotkeyConfig, on_fire: Callable[[str], None]) -> None:
         self.config = config
         self.on_fire = on_fire
-        self.tracker = ComboTracker()
+        self.tracker = ComboTracker(_os_modifier_down())
         self._listener = None
         self._lock = threading.Lock()
 

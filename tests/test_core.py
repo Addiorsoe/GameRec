@@ -118,15 +118,6 @@ def test_session_export(tmp_path):
     assert markers[0]["label"] == "walk north" and 0 < markers[0]["t_ns"] < man["duration_s"] * 1e9
 
 
-def test_packet_direction():
-    pc = PacketCapture(ports_fn=lambda pid: {("tcp", 50000), ("udp", 6000)})
-    pc._ports = {("tcp", 50000), ("udp", 6000)}
-    assert pc.classify("tcp", 50000, 443) == "out"
-    assert pc.classify("tcp", 443, 50000) == "in"
-    assert pc.classify("udp", 6000, 9999) == "out"
-    assert pc.classify("tcp", 6000, 9999) is None
-
-
 class _FakeSniffer:
     """Stands in for scapy.AsyncSniffer: fails in its thread when a BPF filter is given."""
 

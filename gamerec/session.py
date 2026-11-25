@@ -33,7 +33,13 @@ class Session:
         self.notes = ""
 
     def start(self) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
+        # two sessions in the same second must never share (and overwrite) a folder
+        base, n = self.dir, 2
+        while self.dir.exists():
+            self.dir = base.with_name(f"{base.name}_{n}")
+            n += 1
+        self.name = self.dir.name
+        self.dir.mkdir(parents=True)
         (self.dir / "logs").mkdir(exist_ok=True)
         self._log_handler = logging.FileHandler(self.dir / "logs" / "recorder.log", encoding="utf-8")
         self._log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(threadName)s %(message)s"))
