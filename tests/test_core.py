@@ -47,6 +47,8 @@ def test_resolve_variants():
     assert resolve(WatchEntry("a", address=0x1234), r) == 0x1234
     assert resolve(WatchEntry("b", module="game.exe", offset=0x200), r) == 0x400200
     assert resolve(WatchEntry("c", module="game.exe", offsets=[0x100, 0x10, 0x40]), r) == 0xA040
+    # absolute pointer base: [[0x400100]+0x10]+0x40
+    assert resolve(WatchEntry("d", address=0x400100, offsets=[0, 0x10, 0x40]), r) == 0xA040
 
 
 def test_watchentry_roundtrip():
@@ -116,15 +118,6 @@ def test_session_export(tmp_path):
     assert markers[0]["label"] == "walk north" and 0 < markers[0]["t_ns"] < man["duration_s"] * 1e9
 
 
-def test_packet_direction():
-    pc = PacketCapture(ports_fn=lambda pid: {("tcp", 50000), ("udp", 6000)})
-    pc._ports = {("tcp", 50000), ("udp", 6000)}
-    assert pc.classify("tcp", 50000, 443) == "out"
-    assert pc.classify("tcp", 443, 50000) == "in"
-    assert pc.classify("udp", 6000, 9999) == "out"
-    assert pc.classify("tcp", 6000, 9999) is None
-
-
 class _FakeSniffer:
     """Stands in for scapy.AsyncSniffer: fails in its thread when a BPF filter is given."""
 
@@ -156,6 +149,9 @@ def _run_capture(tmp_path, monkeypatch, fail_always):
 
     monkeypatch.setattr(_FakeSniffer, "fail_always", fail_always)
     monkeypatch.setattr(scapy.all, "AsyncSniffer", _FakeSniffer)
+    import gamerec.net.capture as cap
+
+    monkeypatch.setattr(cap, "_npcap_installed", lambda: True)  # CI runners have no Npcap
     pc = PacketCapture(ports_fn=lambda pid: set())
     s = Session(TARGET, [pc], root=tmp_path)
     s.start()

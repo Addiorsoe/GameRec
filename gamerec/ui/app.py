@@ -2,18 +2,30 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
+import threading
 import time
 import tkinter as tk
+import traceback
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from .. import __version__
 from ..build import make_recorders
+from ..env_check import default_output_dir, is_admin, is_windows, npcap_installed, open_folder, run_checks
+from ..hotkeys import FORCE_STOP, HotkeyConfig, GlobalHotkeys, pretty
+from .env_dialog import EnvDialog
+from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
-from ..memory.watcher import WatchEntry
-from ..process import get_target, list_processes
-from ..session import Session
+from ..memory.watcher import WatchEntry, load_watchlist
+from ..process import TargetInfo, get_target, list_processes, target_from_foreground
+from ..session import Session, next_take
 
 TYPES = ["int32", "uint32", "int16", "int64", "float", "double", "uint8", "bytes:16"]
+
+
+GROUPS = ("A", "B", "C", "D", "E", "F", "G")
 
 
 class App(ttk.Frame):
@@ -23,13 +35,21 @@ class App(ttk.Frame):
         self.session: Session | None = None
         self.watch: list[WatchEntry] = []
         self._last_mark = 0.0
+        self.last_zip: Path | None = None
+        self._saved_notes = ""
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
-        master.title("GameRec 記憶體 / 封包 / 畫面記錄器")
+        self._hk_paused = False
+        self._busy = False  # True while starting/stopping: hotkeys must not re-enter
+        self.locked: TargetInfo | None = None  # set by the lock-target hotkey
+        self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
+        master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
         self._build()
         self.refresh_processes()
+        self._start_hotkeys()
+        self.after(300, self.check_environment)
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -39,6 +59,9 @@ class App(ttk.Frame):
         self.proc_box = ttk.Combobox(tgt, textvariable=self.proc_var, width=50)
         self.proc_box.grid(row=0, column=0, sticky="ew")
         ttk.Button(tgt, text="重新整理", command=self.refresh_processes).grid(row=0, column=1, padx=4)
+        self.lock_var = tk.StringVar()
+        ttk.Label(tgt, textvariable=self.lock_var, foreground="#0a6").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.proc_box.bind("<<ComboboxSelected>>", lambda _e: self.unlock())
         tgt.columnconfigure(0, weight=1)
 
         mem = ttk.LabelFrame(self, text="記憶體監看清單", padding=6)
@@ -74,22 +97,94 @@ class App(ttk.Frame):
         for i, (lbl, var) in enumerate((("記憶體 Hz", self.v_rate), ("FPS", self.v_fps), ("縮放", self.v_scale))):
             ttk.Label(opt, text=lbl).grid(row=0, column=3 + i * 2, padx=(10, 2))
             ttk.Entry(opt, textvariable=var, width=6).grid(row=0, column=4 + i * 2)
+        self.env_var = tk.StringVar()
+        self.env_label = ttk.Label(opt, textvariable=self.env_var)
+        self.env_label.grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        self.b_npcap = ttk.Button(opt, text="安裝 Npcap", command=self.open_env)
+        self.b_npcap.grid(row=1, column=6, columnspan=2, sticky="w", pady=(4, 0))
+        self.b_npcap.grid_remove()
+        ttk.Button(opt, text="環境檢查 / 更新", command=self.open_env).grid(row=1, column=8, sticky="w", pady=(4, 0))
+
+        out = ttk.Frame(opt)
+        out.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(4, 0))
+        ttk.Label(out, text="輸出資料夾").pack(side="left")
+        self.out_var = tk.StringVar(value=str(default_output_dir()))
+        ttk.Entry(out, textvariable=self.out_var, width=50).pack(side="left", padx=4, fill="x", expand=True)
+        ttk.Button(out, text="選擇…", command=self.pick_out).pack(side="left")
+        ttk.Button(out, text="開啟", command=lambda: self._open(self.out_var.get())).pack(side="left", padx=2)
+
+        rec = ttk.LabelFrame(self, text="本次錄製（一段錄一個動作，每段各自匯出一個 zip）", padding=6)
+        rec.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(rec, text="組別").grid(row=0, column=0, sticky="w")
+        self.group_var = tk.StringVar()
+        ttk.Combobox(rec, textvariable=self.group_var, values=GROUPS, width=8).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(rec, text="檔名會加上組別與流水號，例如 _A-03_", foreground="#555").grid(row=0, column=2, columnspan=2, sticky="w")
+        ttk.Label(rec, text="備註").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.notes_var = tk.StringVar()
+        ttk.Entry(rec, textvariable=self.notes_var).grid(row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        self.b_notes = ttk.Button(rec, text="更新上一段的備註", command=self.save_notes, state="disabled")
+        self.b_notes.grid(row=1, column=3, sticky="e", pady=(4, 0))
+        self.last_var = tk.StringVar(value="錄製前可先填備註；停止時不會跳出視窗，事後也能補寫再按「更新上一段的備註」。")
+        ttk.Label(rec, textvariable=self.last_var, foreground="#555", wraplength=760).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        rec.columnconfigure(2, weight=1)
 
         ctl = ttk.Frame(self, padding=(0, 6))
-        ctl.grid(row=3, column=0, sticky="ew")
+        ctl.grid(row=4, column=0, sticky="ew")
         self.b_start = ttk.Button(ctl, text="● 開始", command=self.start)
-        self.b_mark = ttk.Button(ctl, text="加標記 (F9)", command=self.mark, state="disabled")
+        self.b_mark = ttk.Button(ctl, text="加標記", command=self.mark, state="disabled")
         self.b_stop = ttk.Button(ctl, text="■ 停止並匯出", command=self.stop, state="disabled")
         for b in (self.b_start, self.b_mark, self.b_stop):
             b.pack(side="left", padx=2)
+        ttk.Button(ctl, text="熱鍵設定…", command=self.open_hotkeys).pack(side="right", padx=2)
         self.mark_var = tk.StringVar()
         ttk.Entry(ctl, textvariable=self.mark_var, width=24).pack(side="left", padx=4)
+        self.hk_hint = tk.StringVar()
+        ttk.Label(ctl, textvariable=self.hk_hint, foreground="#a00").pack(side="right", padx=6)
         self.status = tk.StringVar(value="就緒")
-        ttk.Label(self, textvariable=self.status, foreground="#555").grid(row=4, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.status, foreground="#555").grid(row=5, column=0, sticky="w")
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
-        self.master.bind("<F9>", lambda _e: self.mark())
+        self._label_hotkeys()
+
+    # ---------------------------------------------------------- environment
+    def check_environment(self, auto_open: bool = True) -> None:
+        """Refresh the status line; open the environment window if anything is missing."""
+        checks = run_checks()
+        if not getattr(self, "_hw_started", False):  # PC specs: scanned once, alongside the first check
+            self._hw_started = True
+            threading.Thread(target=_scan_hardware_once, daemon=True).start()
+        msgs = []
+        if not is_admin():
+            msgs.append("⚠ 未以系統管理員執行（讀記憶體可能失敗）")
+        if npcap_installed():
+            msgs.append("✓ Npcap 已安裝，可以抓封包")
+            self.b_npcap.grid_remove()
+        else:
+            msgs.append("✗ 未安裝 Npcap：封包功能停用（記憶體與錄影照常）")
+            self.v_net.set(False)
+            self.b_npcap.grid()
+        self.env_var.set("　".join(msgs))
+        if auto_open and not all(c.ok for c in checks) and not getattr(self, "_env_shown", False):
+            self._env_shown = True
+            self.open_env()
+
+    def open_env(self) -> None:
+        dlg = getattr(self, "_env_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        self._env_dlg = EnvDialog(self.master, on_change=lambda: self.check_environment(auto_open=False))
+
+    def pick_out(self) -> None:
+        p = filedialog.askdirectory(initialdir=self.out_var.get())
+        if p:
+            self.out_var.set(p)
+
+    def _open(self, path: str) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        open_folder(path)
 
     # --------------------------------------------------------------- target
     def refresh_processes(self) -> None:
@@ -97,6 +192,38 @@ class App(ttk.Frame):
             self.proc_box["values"] = [f"{name}  [{pid}]" for pid, name in list_processes()]
         except Exception as e:  # noqa: BLE001
             self.status.set(f"無法列出程式：{e}")
+
+    def lock_foreground(self) -> None:
+        """Lock the target to the window that currently has focus (hotkey)."""
+        if self.session and self.session.started and not self.session.stopped:
+            self.status.set("錄製中不能更換目標")
+            return
+        t = target_from_foreground()
+        if t is None:
+            self.status.set("無法取得目前視窗（只支援 Windows）")
+            return
+        import os
+
+        if t.pid == os.getpid():
+            self.status.set(f"請先點一下遊戲視窗，再按 {pretty(self.hk_config.bindings['lock_target'])}")
+            return
+        self.locked = t
+        self.proc_var.set(f"{t.name}  [{t.pid}]")
+        self.lock_var.set(f"🔒 已鎖定：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
+        self.status.set(f"已鎖定 {t.name}")
+        try:
+            self.master.bell()
+        except tk.TclError:
+            pass
+
+    def unlock(self) -> None:
+        self.locked = None
+        self._lock_hint()
+
+    def _lock_hint(self) -> None:
+        if not self.locked:
+            self.lock_var.set(f"建議：切到遊戲視窗按 {pretty(self.hk_config.bindings['lock_target'])} 鎖定目標，"
+                              "避免抓到錯誤的程式（下拉選單會自動猜視窗，可能不準）")
 
     def _pid(self) -> int:
         s = self.proc_var.get()
@@ -114,6 +241,9 @@ class App(ttk.Frame):
             if len(offs) == 1:
                 return WatchEntry(name=name, type=vtype, module=module.strip(), offset=offs[0])
             return WatchEntry(name=name, type=vtype, module=module.strip(), offsets=offs)
+        if "," in where:  # absolute pointer base + chain: 0x1234,0x10,0x8
+            first, *rest = [int(x.strip(), 0) for x in where.split(",")]
+            return WatchEntry(name=name, type=vtype, address=first, offsets=[0, *rest])
         return WatchEntry(name=name, type=vtype, address=int(where, 0))
 
     @staticmethod
@@ -122,6 +252,8 @@ class App(ttk.Frame):
             return f"{e.module}+" + ",".join(hex(o) for o in e.offsets)
         if e.module:
             return f"{e.module}+{hex(e.offset or 0)}"
+        if e.offsets:
+            return ",".join([hex(e.address or 0), *(hex(o) for o in e.offsets[1:])])
         return hex(e.address or 0)
 
     def _redraw(self) -> None:
@@ -132,6 +264,8 @@ class App(ttk.Frame):
     def add_watch(self) -> None:
         try:
             name = self.e_name.get().strip() or f"v{len(self.watch) + 1}"
+            if any(w.name == name for w in self.watch):
+                raise ValueError(f"名稱「{name}」已存在，請換一個（同名會讓資料混在一起）")
             self.watch.append(self.parse_where(name, self.e_type.get(), self.e_addr.get()))
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("位址格式錯誤", str(e))
@@ -146,8 +280,11 @@ class App(ttk.Frame):
     def load_watch(self) -> None:
         p = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
         if p:
-            with open(p, encoding="utf-8") as f:
-                self.watch = [WatchEntry.from_dict(d) for d in json.load(f)]
+            try:
+                self.watch = load_watchlist(p)
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror("無法匯入", str(e))
+                return
             self._redraw()
 
     def save_watch(self) -> None:
@@ -158,8 +295,21 @@ class App(ttk.Frame):
 
     # -------------------------------------------------------------- session
     def start(self) -> None:
+        if self._busy or (self.session and self.session.started and not self.session.stopped):
+            return
+        if self.locked:
+            import psutil
+
+            try:
+                alive = psutil.Process(self.locked.pid).name() == self.locked.name
+            except psutil.Error:
+                alive = False
+            if not alive:  # the pid may now belong to a different program
+                self.unlock()
+                messagebox.showerror("無法開始", "鎖定的程式已經關閉，請重新切到遊戲視窗按鎖定熱鍵。")
+                return
         try:
-            target = get_target(self._pid())
+            target = self.locked or get_target(self._pid())
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("無法開始", str(e))
             return
@@ -174,24 +324,70 @@ class App(ttk.Frame):
             self.watch, network=self.v_net.get(), video=self.v_vid.get(), inputs=self.v_inp.get(),
             rate_hz=rate, fps=fps, scale=scale,
         )
-        self.session = Session(target, recs)
-        for r in recs:  # F9 also works while the game window has focus
-            if r.kind == "input":
-                # Called on pynput's thread: never touch tkinter here, hand off via a queue.
-                r.on_key = lambda k: k == "f9" and self._hotkeys.put(k)
+        if self.v_net.get() and not npcap_installed():
+            messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
+        if not recs:
+            messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
+            return
+        group = self.group_var.get().strip()
+        take = next_take(self.out_var.get(), group) if group else None
+        if self.last_zip is not None and self.notes_var.get() == self._saved_notes:
+            self.notes_var.set("")  # the previous segment's note is already saved with it
+        self.session = Session(target, recs, root=self.out_var.get(), group=group, take=take)
         self.session.start()
+        self.b_notes["state"] = "disabled"
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "disabled", "normal", "normal"
         self._tick()
+
+    # -------------------------------------------------------------- hotkeys
+    def _start_hotkeys(self) -> None:
+        def fire(action: str) -> None:  # pynput thread: never touch tkinter here
+            if not self._hk_paused or action == "force_stop":
+                self._hotkeys.put(action)
+
+        self._global_hk = GlobalHotkeys(self.hk_config, fire)
+        try:
+            self._global_hk.start()
+        except Exception as e:  # noqa: BLE001 - app still works with buttons
+            logging.getLogger("gamerec").warning("global hotkeys unavailable: %s", e)
         self._poll_hotkeys()
 
     def _poll_hotkeys(self) -> None:
-        s = self.session
-        if not s or s.stopped:
+        try:
+            while not self._hotkeys.empty():
+                self.handle_hotkey(self._hotkeys.get_nowait())
+        finally:  # an error in one action must not silently kill hotkeys for the rest of the run
+            self.after(50, self._poll_hotkeys)
+
+    def handle_hotkey(self, action: str) -> None:
+        if self._busy:  # a stop/export dialog is open: ignore (prevents nested stop/start)
             return
-        while not self._hotkeys.empty():
-            self._hotkeys.get_nowait()
+        recording = bool(self.session and self.session.started and not self.session.stopped)
+        if action == "force_stop":
+            if recording:
+                self.stop(forced=True)
+        elif action == "mark" and recording:
             self.mark()
-        self.after(50, self._poll_hotkeys)
+        elif action == "lock_target" and not recording:
+            self.lock_foreground()
+        elif action == "start_stop":
+            self.stop() if recording else self.start()
+
+    def _label_hotkeys(self) -> None:
+        b = self.hk_config.bindings
+        self.b_start.configure(text=f"● 開始 ({pretty(b['start_stop'])})")
+        self.b_stop.configure(text=f"■ 停止並匯出 ({pretty(b['start_stop'])})")
+        self.b_mark.configure(text=f"加標記 ({pretty(b['mark'])})")
+        self.hk_hint.set(f"鎖定目標：{pretty(b['lock_target'])}　強制停止：{pretty(FORCE_STOP)}（固定）")
+        self._lock_hint()
+
+    def open_hotkeys(self) -> None:
+        dlg = getattr(self, "_hk_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        self._hk_dlg = HotkeyDialog(self.master, self.hk_config, on_change=self._label_hotkeys,
+                                    on_capture=lambda on: setattr(self, "_hk_paused", on))
 
     def _tick(self) -> None:
         s = self.session
@@ -212,28 +408,133 @@ class App(ttk.Frame):
             self.mark_var.set("")
             self.status.set(f"已加標記 @ {m['t_ns'] / 1e9:.2f}s：{m['label']}")
 
-    def stop(self) -> None:
-        if not self.session:
+    def stop(self, forced: bool = False) -> None:
+        """Stop and export right away. No dialog: it would steal focus from the game."""
+        if self._busy or not self.session or self.session.stopped:
             return
-        self.status.set("停止中，正在匯出…")
-        self.update_idletasks()
-        notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）")
-        zpath = export_session(self.session, notes=notes or "")
+        self._busy = True
+        try:
+            self.session.stop()
+            self.status.set("已停止，正在匯出…")
+            self.update_idletasks()
+            notes = self.notes_var.get().strip()
+            if forced:
+                notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
+            zpath = export_session(self.session, notes=notes)
+        finally:
+            self._busy = False
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "normal", "disabled", "disabled"
-        summary = "\n".join(f"{k}: {st} ({n})" for k, (st, n) in self.session.stats().items())
-        self.status.set(f"已匯出 {zpath}")
-        messagebox.showinfo("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。")
+        self.last_zip, self._saved_notes = zpath, self.notes_var.get()
+        self.b_notes["state"] = "normal"
+        summary = "，".join(f"{k} {st} {n}" for k, (st, n) in self.session.stats().items())
+        self.status.set(f"已匯出 {zpath.name}")
+        self.last_var.set(f"上一段：{zpath.name}（{summary}）")
+
+    def save_notes(self) -> None:
+        """Rewrite the last segment's zip with the note typed afterwards."""
+        if self._busy or not self.session or not self.session.stopped or self.last_zip is None:
+            return
+        notes = self.notes_var.get().strip()
+        if self.session.notes.endswith("（使用強制停止鍵結束）"):
+            notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
+        self.last_zip = export_session(self.session, out_dir=self.last_zip.parent, notes=notes)
+        self._saved_notes = self.notes_var.get()
+        self.status.set(f"已更新備註：{self.last_zip.name}")
 
 
-def _ask_text(master, title: str, prompt: str) -> str | None:
-    from tkinter import simpledialog
+def _scan_hardware_once() -> None:
+    try:
+        from ..sysinfo import load_or_scan
 
-    return simpledialog.askstring(title, prompt, parent=master)
+        load_or_scan()
+    except Exception:  # noqa: BLE001 - specs are informational, never block the app
+        logging.getLogger("gamerec").exception("hardware scan failed")
 
 
-def run_gui() -> int:
+def _crash_log() -> Path:
+    p = default_output_dir().parent / "gamerec_error.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def run_gui(smoke_file: str | None = None) -> int:
+    if is_windows():
+        try:  # crisp text on high-DPI screens
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:  # noqa: BLE001
+            pass
     root = tk.Tk()
-    root.geometry("760x560")
-    App(root)
+    root.geometry("860x620")
+
+    last_dialog = [0.0]
+
+    def report(exc, val, tb):
+        text = "".join(traceback.format_exception(exc, val, tb))
+        if smoke_file:  # never block a packaging check on a modal dialog
+            with open(smoke_file, "w", encoding="utf-8") as f:
+                json.dump({"ok": False, "error": str(val), "trace": text}, f, ensure_ascii=False)
+            root.destroy()
+            return
+        logging.getLogger("gamerec").error(text)
+        try:
+            with open(_crash_log(), "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except OSError:
+            pass
+        # one dialog at a time, at most every 5 s: a repeating error must not flood the screen
+        now = time.monotonic()
+        if now - last_dialog[0] < 5:
+            return
+        last_dialog[0] = float("inf")
+        try:
+            messagebox.showerror("發生錯誤", f"{val}\n\n詳細記錄：{_crash_log()}")
+        finally:
+            last_dialog[0] = time.monotonic()
+
+    root.report_callback_exception = report
+    app = App(root)
+
+    def on_close():
+        if app.session and app.session.started and not app.session.stopped:
+            if not messagebox.askyesno("離開", "仍在錄製中，要停止並匯出後再離開嗎？\n（選「否」直接離開，資料不會打包）"):
+                app.session.stop()
+                root.destroy()
+                return
+            app.stop()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    if smoke_file:
+        _arm_smoke(root, app, smoke_file)
     root.mainloop()
     return 0
+
+
+def _arm_smoke(root, app, smoke_file: str) -> None:
+    """Packaging check: prove the window, recorder modules and env checks load, then exit."""
+
+    def finish():
+        info = {"ok": True, "version": __version__}
+        try:
+            import importlib
+
+            for mod in ("cv2", "mss", "numpy", "psutil", "pymem", "pynput.keyboard", "scapy.all",
+                        "gamerec.memory.scanner", "gamerec.net.capture", "gamerec.video.recorder",
+                        "gamerec.inputs.logger", "gamerec.env_check", "gamerec.ui.env_dialog",
+                        "gamerec.hotkeys", "gamerec.ui.hotkey_dialog"):
+                importlib.import_module(mod)
+            info["processes"] = len(app.proc_box["values"])
+            info["env"] = {c.key: c.ok for c in run_checks()}
+            from ..sysinfo import load_or_scan
+            info["sysinfo"] = load_or_scan()
+            info["env_fixes"] = [c.fix_label for c in run_checks() if c.fix_label]  # one-click installer bundled
+            info["hotkeys"] = app.hk_config.bindings
+        except Exception as e:  # noqa: BLE001
+            info = {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()}
+        with open(smoke_file, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False)
+        root.destroy()
+
+    root.after(4000, finish)

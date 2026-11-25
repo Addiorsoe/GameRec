@@ -26,38 +26,41 @@ class ValueScanner:
         self.results: dict[int, object] = {}
 
     def _regions(self):
-        """Yield (base, size) of committed, readable+writable private/image memory."""
-        import pymem.ressources.kernel32 as k32
-        import pymem.ressources.structure as st
+        """Yield (base, size) of committed, writable, non-guard memory regions."""
+        import pymem.exception
+        import pymem.memory
 
-        addr, end = 0, 0x7FFFFFFFFFFF
-        mbi = st.MEMORY_BASIC_INFORMATION()
-        import ctypes
-
+        addr, end = 0, 0x7FFFFFFF0000
         while addr < end:
-            if k32.VirtualQueryEx(self.pm.process_handle, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
+            try:
+                mbi = pymem.memory.virtual_query(self.pm.process_handle, addr)
+            except pymem.exception.WinAPIError:
                 break
             base, size = mbi.BaseAddress or 0, mbi.RegionSize
-            writable = mbi.Protect & 0x04 or mbi.Protect & 0x40  # PAGE_READWRITE | PAGE_EXECUTE_READWRITE
-            if mbi.State == 0x1000 and writable and not mbi.Protect & 0x100:  # MEM_COMMIT, not GUARD
+            if size <= 0:
+                break
+            writable = mbi.Protect & (0x04 | 0x08 | 0x40 | 0x80)  # RW, WRITECOPY, EXEC_RW, EXEC_WRITECOPY
+            if mbi.State == 0x1000 and writable and not mbi.Protect & 0x100:  # MEM_COMMIT, not PAGE_GUARD
                 yield base, size
             addr = base + size
 
     def first_scan(self, value, align: int = 4, limit: int = 2_000_000) -> int:
         needle = encode(self.vtype, value)
         self.results.clear()
+        chunk = 32 * 1024 * 1024
         for base, size in self._regions():
-            try:
-                buf = self.pm.read_bytes(base, size)
-            except Exception:  # noqa: BLE001
-                continue
-            i = buf.find(needle)
-            while i != -1:
-                if i % align == 0:
-                    self.results[base + i] = value
-                    if len(self.results) >= limit:
-                        return len(self.results)
-                i = buf.find(needle, i + 1)
+            for off in range(0, size, chunk):
+                try:
+                    buf = self.pm.read_bytes(base + off, min(chunk, size - off))
+                except Exception:  # noqa: BLE001 - page vanished meanwhile
+                    continue
+                i = buf.find(needle)
+                while i != -1:
+                    if i % align == 0:
+                        self.results[base + off + i] = value
+                        if len(self.results) >= limit:
+                            return len(self.results)
+                    i = buf.find(needle, i + 1)
         return len(self.results)
 
     def next_scan(self, mode: str = "exact", value=None) -> int:

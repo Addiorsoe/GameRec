@@ -52,6 +52,7 @@
 | `gamerec/net/capture.py` | scapy + Npcap | 抓網卡封包，依目標程式目前的本機埠動態過濾，寫 pcap + JSONL 索引 |
 | `gamerec/video/recorder.py` | mss, opencv-python | 依視窗位置截圖錄成 mp4，每幀寫時間戳 |
 | `gamerec/inputs/logger.py` | pynput | 記錄鍵盤/滑鼠事件（巡路分析需要知道玩家按了什麼） |
+| `gamerec/sysinfo.py` | psutil, winreg | 電腦規格掃描（只掃一次，存本機 `system_info.json`，供 AutoPath 判斷虛擬機可行性） |
 | `gamerec/session.py` | — | 建立 session 資料夾、管理所有記錄器、標記 |
 | `gamerec/export.py` | zipfile | 產生 manifest、打包 zip |
 | `gamerec/ui/app.py` | tkinter | 圖形介面 |
@@ -82,7 +83,7 @@ TCP/UDP 連線的本機埠，抓網卡全部流量，只保留來源或目的埠
 
 ## 4. 匯出封包規格（交給 Claude 的檔案）
 
-檔名：`session_YYYYMMDD_HHMMSS_<程式名>.zip`
+檔名：`session_YYYYMMDD_HHMMSS_<程式名>.zip`；有選組別時為 `session_YYYYMMDD_HHMMSS_<組別>-<流水號>_<程式名>.zip`（manifest 另有 `group`、`take`）
 
 ```
 manifest.json           # 本次記錄的總說明（見下）
@@ -127,13 +128,14 @@ logs/recorder.log
 2. **記憶體**：監看清單表格（新增/刪除/匯入/匯出 JSON）＋「掃描器」分頁：
    輸入數值 → 首次掃描 → 變動後再掃描 → 把結果加入監看清單。
 3. **錄製設定**：勾選要啟用的記錄器、FPS、取樣頻率、網卡選擇。
-4. **控制列**：開始 / 停止 / 加標記（熱鍵 F9）/ 匯出 zip；即時顯示各串流筆數。
+4. **本次錄製**：組別（檔名加 `_A-03_` 流水號）、備註（停止時不跳視窗，可事後更新）。
+5. **控制列**：開始/停止（F9，停止即匯出）/ 加標記（F10）；即時顯示各串流筆數。
 
 ## 6. 打包
 
-- `PyInstaller` 單一資料夾模式（`scripts/build_exe.bat`），產出 `dist/GameRec/GameRec.exe`。
+- `PyInstaller` 單一檔案、無主控台模式（`scripts/build_exe.bat`），產出可直接雙擊的 `dist/GameRec.exe`；GitHub Actions 在 windows-latest 自動建置並發佈到 Releases。
 - 需要系統管理員權限（讀其他程式記憶體、抓封包），exe 內嵌 `uac_admin` manifest。
-- 使用者需自行安裝 **Npcap**（安裝時勾選 WinPcap 相容模式）；沒裝時網路串流會標記為 `unavailable`，其他照常。
+- 使用者需自行安裝 **Npcap**（授權不允許隨附，安裝時勾選 WinPcap 相容模式）；GUI 啟動時偵測，沒裝會跳提示並提供下載按鈕，封包串流自動停用，其他照常。
 
 ## 7. 開發階段
 
@@ -141,6 +143,6 @@ logs/recorder.log
 |---|---|
 | **M1（本次骨架）** | 時鐘、session、匯出、四個記錄器的基本實作、tkinter 介面、CLI、測試、打包腳本 |
 | M2 | 記憶體掃描器 UI、指標鏈驗證、影片縮放/區域選取、匯出前預覽 |
-| M3 | 分析工具：時間軸對齊檢視、座標軌跡圖、封包欄位與座標相關性比對 |
+| M3 | （不在程式內做）操作、封包、記憶體之間的對應關係由使用者把匯出 zip 交給 Claude 判讀；程式只負責準確記錄與對齊時間 |
 | M4 | 自動巡路／刷圖：獨立的第二個程式 **AutoPath**，讀取本工具匯出的 zip，詳見 `docs/AUTOFARM_DESIGN.md` |
 | M5 | 讓 Claude 透過 CLI 直接連到電腦操作（後續再做） |

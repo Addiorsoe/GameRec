@@ -5,6 +5,7 @@ import json
 import threading
 import time
 
+from ..hotkeys import pynput_key_name
 from ..recorder import Recorder
 
 
@@ -16,7 +17,7 @@ class InputLogger(Recorder):
         self._min_move_ns = int(1e9 / mouse_move_hz) if mouse_move_hz else 0
         self._last_move = 0
         self._lock = threading.Lock()
-        self.on_key = None  # optional callback(key_name) used for hotkeys (e.g. F9 marker)
+        self._down: set[str] = set()
 
     def setup(self) -> None:
         from pynput import keyboard, mouse  # noqa: PLC0415
@@ -37,16 +38,21 @@ class InputLogger(Recorder):
 
     @staticmethod
     def _name(key) -> str:
-        return getattr(key, "char", None) or str(key).replace("Key.", "")
+        # same naming as the hotkeys; Ctrl+A is "a", not the control character pynput reports
+        return pynput_key_name(key)
 
     def _key_down(self, key):
         name = self._name(key)
-        self._write({"kind": "key_down", "key": name})
-        if self.on_key:
-            self.on_key(name)
+        rec = {"kind": "key_down", "key": name}
+        if name in self._down:
+            rec["repeat"] = True  # OS auto-repeat while held, not a new press
+        self._down.add(name)
+        self._write(rec)
 
     def _key_up(self, key):
-        self._write({"kind": "key_up", "key": self._name(key)})
+        name = self._name(key)
+        self._down.discard(name)
+        self._write({"kind": "key_up", "key": name})
 
     def _move(self, x, y):
         t = time.perf_counter_ns()

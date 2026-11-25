@@ -6,3 +6,5 @@ dist/
 *.spec
 sessions/
 .pytest_cache/
+e2e-artifacts/
+scripts/trials/

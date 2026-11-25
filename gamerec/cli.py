@@ -10,12 +10,23 @@ import time
 from . import __version__
 
 
+def _ensure_streams() -> None:
+    """A --windowed PyInstaller exe has no console: sys.stdout/stderr are None and print() crashes."""
+    import os
+
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_streams()
     ap = argparse.ArgumentParser(prog="gamerec", description="記錄指定程式的記憶體、封包、畫面與輸入，並匯出成單一 zip")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd")
 
-    sub.add_parser("gui", help="開啟圖形介面（預設）")
+    gp = sub.add_parser("gui", help="開啟圖形介面（預設）")
+    gp.add_argument("--smoke-test", metavar="FILE", help="開啟視窗後自動關閉並寫入結果（打包驗證用）")
     sub.add_parser("ps", help="列出程式")
 
     r = sub.add_parser("record", help="開始記錄，Ctrl+C 或時間到即停止並匯出")
@@ -33,12 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-input", action="store_true")
     r.add_argument("--out", default="sessions", help="輸出資料夾")
     r.add_argument("--notes", default="", help="寫入 manifest 的備註")
+    r.add_argument("--result", help="把匯出的 zip 路徑寫到這個檔案（自動化用）")
 
     args = ap.parse_args(argv)
     if args.cmd in (None, "gui"):
         from .ui.app import run_gui
 
-        return run_gui()
+        return run_gui(smoke_file=getattr(args, "smoke_test", None))
     if args.cmd == "ps":
         from .process import list_processes
 
@@ -79,6 +91,9 @@ def _record(args) -> int:
     for kind, (status, count) in s.stats().items():
         print(f"[{kind}] {status} {count}")
     print(f"已匯出：{z}")
+    if args.result:
+        with open(args.result, "w", encoding="utf-8") as f:
+            f.write(str(z.resolve()))
     return 0
 
 

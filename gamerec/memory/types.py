@@ -22,8 +22,9 @@ def decode(vtype: str, raw: bytes):
     if vtype.startswith("bytes:"):
         return raw.hex()
     v = struct.unpack(FORMATS[vtype], raw)[0]
-    if isinstance(v, float):
-        return round(v, 6)
+    if vtype == "float":
+        # shortest text that round-trips a float32 (no rounding away of small changes)
+        return float(f"{v:.9g}")
     return v
 
 

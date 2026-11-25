@@ -1,0 +1,94 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: python -m pytest -q
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Smoke test imports (GUI + Windows modules)
+        run: python -c "import gamerec.ui.app, gamerec.memory.scanner, gamerec.net.capture, gamerec.video.recorder, gamerec.inputs.logger, win32gui, pymem, scapy.all, cv2, mss, pynput; print('ok')"
+
+      - name: E2E trial run (CLI, from source)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py cli
+
+      - name: E2E trial run (GUI driven, from source)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py gui
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-screenshots
+          path: e2e-artifacts/screens/
+          if-no-files-found: ignore
+
+      - name: Print GUI screenshots to the log (base64 JPEG, for viewers without artifact access)
+        if: always()
+        run: python scripts/print_screens.py
+
+      - name: Build exe
+        run: scripts\build_exe.bat
+        shell: cmd
+
+      - name: Packaged exe starts (GUI smoke test)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py smoke dist/GameRec.exe
+
+      - name: E2E trial run (packaged exe)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py exe dist/GameRec.exe
+
+      - name: Diagnose with a console build (on failure)
+        if: failure()
+        timeout-minutes: 8
+        shell: cmd
+        run: |
+          pyinstaller --noconfirm --onefile --console --name GameRecDebug --collect-submodules scapy --collect-submodules pynput --hidden-import win32gui --hidden-import win32process --paths . --collect-submodules gamerec scripts\run_gamerec.py > NUL 2>&1
+          dist\GameRecDebug.exe gui --smoke-test smoke-debug.json
+          type smoke-debug.json
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GameRec-exe
+          path: dist/GameRec.exe
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GameRec.exe
