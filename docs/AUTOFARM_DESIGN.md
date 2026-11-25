@@ -432,6 +432,7 @@ LOOT.tick:
 | R9 | 躲避**招式**（頭目或怪物的範圍攻擊預兆） | 偵測到預兆後在反應時間內離開範圍 |
 | R10 | 可用**技能閃躲**（翻滾、衝刺、瞬移等） | 閃避技能、距離、冷卻寫在 profile；冷卻中改用走的 |
 | R11 | 任何一步失敗都有明確的停止或回復策略 | 例如：介面沒打開就重試，死亡就停止或依設定復活，超時就離開地圖 |
+| R12 | 每輪開始前確認進圖道具（信標）數量足夠，不足就停止並記錄；Bot 不自動購買 | 信標數量的讀取依據經使用者確認 |
 
 #### 6.7.2 流程腳本（`routes/<name>.yaml`，每一步都是可重用的動作）
 
@@ -442,10 +443,11 @@ name: map_farm
 loop: {max_runs: 50, max_minutes: 120}
 map_timeout_min: 10                           # 地圖內超過 10 分鐘直接離開（使用者需求 8）
 steps:
+  - check_stock:  {item: beacon, min: 1, on_short: stop}                         # R12
   - go_to:        {point: map_device}            # R1，座標定義於 maps/<town>.json
   - interact:     {key: interact, expect: map_ui_open, timeout_s: 3, retry: 2}   # R2
   - select_map:   {map: "地圖A", method: click_template, confirm: map_id_changed} # R3
-  - clear:        {targets: rare, until: all_dead, loot: all}                    # R4，全撿交給遊戲過濾器
+  - clear:        {targets: rare, until: all_dead, loot: pet_auto}               # R4，寵物自動拾取＋遊戲過濾器
   - kill_boss:    {locate: boss_marker, until: boss_dead, max_minutes: 5}        # R5
   - leave_map:    {method: portal_key, confirm: town_map_id}                     # R6
 on_fail:
@@ -527,7 +529,7 @@ dodge:
 | 1 | 地圖是固定生成，但不想每張新地圖都重新錄製 | 新增**自動探索建圖**（見下方 A），第一次進入新地圖時由 AutoPath 自己探索並存成地圖檔，之後重複使用；不需要人工錄製 |
 | 2 | 滑鼠點擊移動；角色在畫面上的位置固定（相對鏡頭），但地形有高度差 | 移動採**方向式點擊**（見下方 B） |
 | 3 | 開地圖單純開啟，不額外投入道具（已確認） | `select_map` 只做「選地圖 → 開始」，不操作任何額外投入的道具欄位；介面狀態與預期不符時停止並記錄 |
-| 4 | 掉落物全撿，遊戲本身有過濾器 | 撿物不做物品判斷：清怪後在掉落位置附近依序撿取（撿取鍵或點擊遊戲顯示的掉落標籤），過濾交給遊戲 |
+| 4 | 掉落物全撿，遊戲本身有過濾器 | 撿物不做物品判斷；火炬之光：無限有寵物自動拾取（見 6.7.9），所以預設靠寵物撿，Bot 只在掉落區停留；寵物撿不到的物品類型才用撿取鍵備援 |
 | 5 | 閃避技能未定，希望能自己設定按鍵 | 新增**遊戲按鍵設定**（見下方 C），閃避鍵、攻擊鍵等都可自訂，與 AutoPath 熱鍵一起做衝突檢查 |
 | 6 | 自行重開；死亡則在記錄點重生 | 遊戲當掉／斷線 → 自動重開遊戲並回到流程起點；死亡 → 等待重生 → 回到流程起點重新開始這一輪（見下方 D） |
 | 7 | 執行時還要持續使用電腦 | **影響架構**，見下方 E |
@@ -568,6 +570,40 @@ dodge:
 建議順序：先實測 ③（成本最低），不行就用 ①；④ 一律內建當作安全機制（真人一動就暫停，避免搶滑鼠造成誤操作）。
 
 > ✅ **使用者已選定（2026-11-25）**：先實測 ③ 背景點擊，遊戲不接受就改用 ① 虛擬機；④ 讓位模式內建。AutoPath 的輸入層 `autopath/bot/input.py` 設計成可替換的驅動（`postmessage` / `sendinput`），用設定切換，虛擬機方案沿用 `sendinput`。實測方法：在 AutoPath 加一個「背景點擊測試」按鈕，對遊戲視窗送 PostMessage 點擊並讀角色座標是否改變，結果寫入 log。
+
+#### 6.7.9 目標遊戲：火炬之光：無限（公開資料對照，2026-11-25 查證）
+
+> 標記說明：**[來源]** 為公開資料直接記載；**[推論]** 為依資料推測、尚未驗證；**[使用者]** 為使用者提供。
+
+**遊戲基本資料**
+- 開發／發行：XD Inc.；引擎：Unreal Engine 4；平台：Windows、Android、iOS；全球上線 2023-05-09 **[來源：[Wikipedia](https://en.wikipedia.org/wiki/Torchlight:_Infinite)]**
+- 賽季制，約每季推出新的地圖玩法（例如 S12「Overrealm」新增隨機出現的裂隙與地圖詞綴）**[來源：[Pocket Gamer](https://www.pocketgamer.com/torchlight-infinite/season-12-overrealm-out-now)]**
+
+**地圖流程與本設計的對照**
+
+| 遊戲機制 | 資料 | 對設計的影響 |
+|---|---|---|
+| 進入地圖使用「信標（Beacon）」，綁定區域與時空刻度（Timemark） | **[來源：[TLI Wiki](https://www.torchlight-infinite.wiki/maps/torchlight-infinite-netherrealm-guide)、[Maxroll](https://maxroll.gg/torchlight-infinite/resources/progressing-the-netherrealm)]** | `select_map` 需要指定區域與時空刻度 |
+| 信標每次進圖會消耗，用完可在城鎮用「夢境回響」購買 | **[推論：Maxroll／Wiki 的敘述暗示每輪消耗，未明文]** | **新增需求 R12**：每輪開始前確認信標數量，不足就停止並記錄（Bot 不自動購買） |
+| 完成進度後會開放「羅盤（Compass）」欄位等額外投入 | **[來源：Maxroll]** | 符合使用者需求 3：Bot 不操作羅盤等額外欄位 |
+| 每個區域的頭目為「界域守望者（Plane Watcher）」，需先清若干次關卡累積進度才能挑戰 | **[來源：TLI Wiki、Maxroll]** | 「頭目」步驟分兩種：一般關卡結尾的頭目、守望者；`kill_boss` 需能設定是否挑戰守望者 |
+| 地圖佈局固定或隨機 | 查到的資料**沒有明確記載** **[使用者：固定生成]** | 維持 §6.7.8 A 的自動探索建圖，佈局即使是隨機也能運作 |
+| 寵物（契靈）可自動拾取，設定 > 拾取 > 自動拾取；遊戲內建三級物品過濾 | **[來源：[Gamezebo](https://www.gamezebo.com/walkthroughs/torchlight-infinite-auto-loot/)]**；免費寵物無法撿全部物品 **[來源：同上]** | **調整**：撿物改為「靠寵物自動拾取＋遊戲過濾器」，Bot 只要在清怪後於掉落區停留／經過；不需要撿取鍵邏輯 |
+| 遊戲沒有內建自動戰鬥或自動尋路 | **[來源：外掛販售商頁面 [musabots](https://musabots.com/blog/torchlight-infinite-bot)，非官方，僅供參考]** | — |
+| 移動方式為滑鼠點擊、角色在畫面固定位置 | **[使用者]**（公開資料未查到） | 維持 §6.7.8 B 方向式點擊 |
+
+**記憶體結構 [推論]**：UE4 遊戲的物件與名稱通常集中在引擎的全域物件表中，怪物、地面效果這類實體多半可以從那裡追到。這讓「實體清單」比較有機會找得到，但每次改版偏移都會變，所以 AOB 簽章與 §7 的維護流程更重要。需要用 GameRec 錄製後判讀確認。
+
+**反外掛與服務條款（事實）**
+- 官方公告（2022-10-14）：「任何使用第三方外掛的行為都會嚴重破壞公平健康的遊戲環境」，涉及帳號「將被封禁」，並會持續監控異常遊戲行為 **[來源：[TapTap 官方公告](https://www.taptap.io/post/1774531)]**
+- 官方說明的主要封號原因包含「使用第三方掛機工具自動進行遊戲或獲利」**[來源：[VHPG 轉載的違規處理說明](https://www.vhpg.com/handling-of-violations-torchlight-infinite/)]**
+- 有玩家回報只是使用 YoloMouse（游標美化工具）就收到「違禁軟體」通知 **[來源：[Steam 討論串](https://steamcommunity.com/app/1974050/discussions/0/3548301990162787798/)，玩家自述，非官方]** → **[推論]** 客戶端可能會偵測正在執行的第三方程式。
+- 使用哪一套反外掛系統：查到的公開資料**沒有記載**（騰訊 ACE 的維基頁面未列出本遊戲）**[來源：[Wikipedia ACE](https://en.wikipedia.org/wiki/Anti-Cheat_Expert)]**
+
+**對兩個程式的意義**
+- GameRec 讀記憶體（開啟遊戲程序）、AutoPath 自動操作，都屬於官方明文禁止的「第三方外掛／掛機工具」範圍，在正式帳號上使用有封號風險；這點無法靠技術手段排除，本設計也不提供規避偵測的功能。
+- 被動抓封包（Npcap 在網卡層抓取，不碰遊戲程序）、螢幕錄影對遊戲程序的接觸最少 **[推論，無官方資料]**，但仍屬第三方程式在同機執行。
+- 背景點擊（PostMessage）是否被遊戲接受、虛擬機是否能執行遊戲，都需要實測 **[未驗證]**。
 
 #### 6.7.7 參考的開源專案（只參考設計，不直接複製程式碼；引用前會確認授權）
 
