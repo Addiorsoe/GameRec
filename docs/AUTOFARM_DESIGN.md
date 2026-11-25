@@ -3,6 +3,8 @@
 > 本文件延續 `docs/ARCHITECTURE.md`，說明從「採集資料」到「自動跑圖刷圖可實際使用」的完整流程、需求、資料標記規格、分析管線、巡路腳本架構，以及**隨遊戲更新維護**的方法。
 >
 > ⚠️ 對線上遊戲使用自動化腳本通常違反服務條款，可能封號。本設計以單機、自架私服或測試帳號為前提；**不包含**任何繞過或隱藏於反外掛偵測的設計。
+>
+> 📌 **判讀原則（使用者指定）**：兩個程式都**不自行判斷「哪個操作對應哪個封包」**。程式只負責忠實記錄原始資料與使用者自己打的標記；操作與封包、記憶體之間的對應關係，由使用者把匯出檔交給 Claude 判讀，確認後才寫進設定檔。唯一例外是**可以保證準確**的對應（例如使用者自己在 `actions.yaml` 寫明「按鍵 1 = 攻擊」，程式只是照表轉名稱，沒有任何推測）。
 
 ---
 
@@ -21,7 +23,7 @@
 
 ```
  ┌────────────── 程式一：GameRec ──────────────┐            ┌──────────── 程式二：AutoPath ────────────┐
- │ 監測記憶體 / 封包 / 錄影 / 輸入 / 標記       │  session   │ 分析模式：對齊 → 關聯 → 欄位推斷 → 建地圖   │
+ │ 監測記憶體 / 封包 / 錄影 / 輸入 / 標記       │  session   │ 檢視模式：對齊時間軸、整理原始資料、建地圖   │
  │ 版本指紋、自動動作標記、事後標記             │ ──zip────► │ 設定檔工具：AOB 重掃 / 產生簽章 / 回歸測試   │
  └─────────────────────▲───────────────────────┘            │ 巡路模式：感知 → 狀態機 → A* → 鍵鼠輸入     │
                        │  profiles/<game>/memory.yaml        └───────────────┬──────────────────────────┘
@@ -43,7 +45,8 @@
 | 錄影並記錄分析指定的記憶體位址與封包效果 | GameRec（錄製）＋ AutoPath（分析） | ARCHITECTURE.md §2、§4；本文件 §4 |
 | 用以上分析結果製作自動巡路 | AutoPath | §5、§6.3 |
 | 自動跑圖刷圖 | AutoPath | §6（狀態機、戰鬥、撿物） |
-| 盡可能採集封包與動作的關聯，並打上標記方便寫腳本 | GameRec（標記）＋ AutoPath（關聯分析） | §3、§4 步驟 2～5 |
+| 盡可能採集封包與動作的關聯，並打上標記方便寫腳本 | GameRec（記錄＋使用者標記）；對應關係由 Claude 判讀匯出檔 | §3、§4 |
+| 程式不自行判斷操作與封包的對應（除非保證準確） | 兩者 | 文件開頭判讀原則、§3.2、§4 |
 | 從開始到投入使用的完整流程與需求 | 兩者 | §1、§2 |
 | 隨遊戲更新一併更新或方便維護 | 兩者（共用 profile） | §5、§7 |
 | 自訂熱鍵（組合鍵、滑鼠恢復預設、保留強制停止鍵、禁止重複綁定） | 兩者（AutoPath 規格見本文件；GameRec 依同一份規格） | §6.6、F12、N8 |
@@ -51,10 +54,11 @@
 ## 0.2 總覽
 
 ```
- ┌──── 階段 A：採集（GameRec）────┐   ┌─ 階段 B：分析（AutoPath）─┐   ┌ 階段 C：自動化（AutoPath）┐
- GameRec 錄製（記憶體/封包/影片/輸入）    autopath analyze           autopath run
-   + 動作標記（自動 + 手動）       ──►   對齊 → 事件切分 → 關聯   ──►  感知 → 狀態機 → 行動
-   + 遊戲版本指紋                       → 封包欄位推斷 → 地圖建置       → A* 尋路 → 戰鬥/撿物迴圈
+ ┌──── 階段 A：採集（GameRec）────┐   ┌─ 階段 B：判讀（Claude）──┐   ┌ 階段 C：自動化（AutoPath）┐
+ GameRec 錄製（記憶體/封包/影片/輸入）    autopath view + Claude 判讀 autopath run
+   + 使用者標記（熱鍵 + 事後補標） ──►   對齊時間軸 → 原始資料整理 ──►  感知 → 狀態機 → 行動
+   + 遊戲版本指紋                       → 交給 Claude 判讀 → 確認後     → A* 尋路 → 戰鬥/撿物迴圈
+                                          寫入 profile → 地圖建置
                                         → 產出 game profile          → 安全停止 / 紀錄
                     ▲                                                          │
                     └──────── 階段 D：維護（遊戲更新 → 簽章重掃 → 回歸驗證）◄─────┘
@@ -71,7 +75,7 @@
 | **P0** | 目標確認 | `profiles/<game>/README.md`：遊戲名稱、版本、平台、是否有反外掛、用途（單機/私服/測試帳號） | 確認可合法使用；記錄目前版本號 |
 | **P1** | 關鍵位址探索 | `profiles/<game>/memory.yaml` 初版：座標 x/y/z、地圖 ID、HP/MP、目標 ID、背包數量 | 每個欄位都有 **AOB 簽章** 或指標鏈，重開遊戲 3 次仍正確 |
 | **P2** | 標記式錄製 | 10～30 段已標記的 session（走路、攻擊、施法、撿物、換圖、死亡、回城） | 每類動作至少 20 次樣本；manifest 含版本指紋 |
-| **P3** | 封包／動作關聯分析 | `profiles/<game>/packets.yaml`：opcode 對照表與欄位定義；`analysis_report.md` | 主要動作（移動、攻擊、撿物）的 opcode 信心度 ≥ 0.9 |
+| **P3** | 封包／記憶體判讀 | 使用者把匯出 zip 交給 Claude 判讀 → 使用者確認後寫入 `profiles/<game>/packets.yaml`（每筆標 `status: confirmed`） | 主要動作（移動、攻擊、撿物）的對應都經使用者確認；未確認的項目 AutoPath 不使用 |
 | **P4** | 地圖建置 | `profiles/<game>/maps/<map_id>.json`：可走格網、傳送點、刷怪區、路點 | 在該地圖由錄製軌跡覆蓋 ≥ 80% 可走區 |
 | **P5** | Bot 原型（只觀察） | `autopath run --dry-run`：只讀狀態、規劃路徑、顯示「打算做什麼」，不送出輸入 | 狀態判讀與畫面一致率 ≥ 95% |
 | **P6** | Bot 原型（閉環） | 用**模擬鍵鼠輸入**走路、打怪、撿物 | 指定地圖連續跑 30 分鐘無卡死，卡住能自動脫困 |
@@ -88,10 +92,10 @@
 
 | 編號 | 需求 |
 |---|---|
-| F1 | GameRec 支援「動作標記」：自動（由輸入事件推斷）與手動（熱鍵/按鈕）兩種，並記錄動作開始與結束 |
+| F1 | GameRec 支援使用者標記（熱鍵、按鈕、事後補標），記錄開始與結束時間；按鍵只在使用者自訂的對照表內照表轉成動作名稱，不做推測 |
 | F2 | 每次錄製自動寫入遊戲版本指紋（exe 檔案版本、SHA-256、主要模組大小與時間戳） |
-| F3 | 分析工具能把封包依 opcode 分群，並計算與動作標記、記憶體變化的時間關聯 |
-| F4 | 分析工具能推斷封包欄位（座標、目標 ID、物品 ID）與記憶體數值的對應 |
+| F3 | AutoPath 能把多個串流對齊到同一時間軸並匯出成易讀格式（例如「每個標記前後 1 秒內的封包與記憶體變化」），只整理、不下結論，方便交給 Claude 判讀 |
+| F4 | 封包與記憶體的對應只能來自使用者確認過的 `packets.yaml` / `memory.yaml`；程式不自動推斷欄位意義 |
 | F5 | 由座標軌跡建立可走格網地圖與路點圖，支援手動編修 |
 | F6 | Bot 有狀態機（巡邏/尋怪/戰鬥/撿物/補給/回城/脫困/停止） |
 | F7 | Bot 以 A* 在格網上尋路，並以路點追蹤做閉環移動控制 |
@@ -124,9 +128,9 @@
 
 ```json
 {"id": 12, "t_start_ns": 15200000000, "t_end_ns": 15900000000,
- "kind": "action", "action": "attack", "source": "auto",
+ "kind": "action", "action": "attack", "source": "keymap",
  "args": {"key": "1", "skill": "普攻"}, "target": {"mob_id": 3021},
- "confidence": 1.0, "tags": ["map:101", "combat"], "note": ""}
+ "tags": ["map:101", "combat"], "note": ""}
 ```
 
 | 欄位 | 說明 |
@@ -135,13 +139,12 @@
 | `t_start_ns` / `t_end_ns` | 動作區間；瞬間事件兩者相同 |
 | `kind` | `action`（玩家動作）、`event`（遊戲事件，如怪死亡、升級、換圖）、`state`（持續狀態，如戰鬥中）、`note`（自由備註） |
 | `action` | 受控詞彙，見 3.2 |
-| `source` | `auto`（由輸入推斷）、`hotkey`（玩家按標記熱鍵）、`manual`（事後在時間軸上補標）、`analyzer`（分析器推斷） |
+| `source` | `hotkey`（玩家按標記熱鍵）、`manual`（事後在時間軸上補標）、`keymap`（依使用者自訂的按鍵對照表照表轉換，非推測） |
 | `args` | 動作參數：按鍵、技能名、點擊座標等 |
 | `target` | 目標：怪物、NPC、物品、地圖座標 |
-| `confidence` | 0～1；人工標記為 1，自動推斷 < 1 |
 | `tags` | 自由標籤，建議 `map:<id>`、`area:<名稱>` |
 
-### 3.2 動作詞彙表（`profiles/<game>/actions.yaml`）
+### 3.2 按鍵對照表（`profiles/<game>/actions.yaml`，由使用者填寫）
 
 ```yaml
 actions:
@@ -156,7 +159,13 @@ actions:
 events:      [mob_killed, item_dropped, item_looted, map_changed, player_died, level_up, inventory_full]
 ```
 
-自動標記器根據這張表，把 `input/events.jsonl` 的按鍵轉為 `action` 標記（按下到放開為一個區間）。玩家只需要手動標記**遊戲事件**（怪死了、撿到東西），或用熱鍵快速標記。
+這張表是**使用者自己寫的事實**（「我把攻擊設在 1」），所以照表把 `input/events.jsonl` 的按鍵轉成動作名稱是準確的，標為 `source: keymap`；表裡沒有的按鍵就保持原始按鍵，不猜。
+
+程式**不會**做的事：
+- 不判斷某個動作送出了哪個封包、某個封包代表什麼。
+- 不從記憶體變化推測遊戲事件（例如不會因為經驗值上升就自動標「怪死亡」）；遊戲事件由使用者用熱鍵或事後補標。
+
+這些對應交給 Claude 判讀匯出檔，使用者確認後才寫進 `packets.yaml`。
 
 ### 3.3 GUI／熱鍵擴充
 
@@ -166,7 +175,7 @@ events:      [mob_killed, item_dropped, item_looted, map_changed, player_died, l
 | `F5`～`F8` | 可在設定中綁定常用事件（預設：怪死亡、掉落、撿到、換圖） |
 | `Ctrl+F9` | 開始／結束一個「區段」，例如「這段是在刷 A 區」 |
 
-另外新增「事後標記」視窗：拖動影片時間軸、看到對應記憶體與封包，點選補標，並可修正自動標記的錯誤。
+另外新增「事後標記」視窗：拖動影片時間軸、看到同一時刻的記憶體與封包原始值，點選補標或修改標記。
 
 ### 3.4 版本指紋（寫入 `manifest.json`）
 
@@ -179,34 +188,35 @@ events:      [mob_killed, item_dropped, item_looted, map_changed, player_died, l
 }
 ```
 
-### 3.5 其他採集建議（提高封包↔動作關聯品質）
+### 3.5 錄製建議（讓 Claude 判讀更準確）
 
-- **刻意的單一動作錄製**：每段錄製只做一種動作（例如原地重複攻擊同一隻怪 20 次），中間停頓 1 秒以上，讓封包分群更乾淨。
+- **刻意的單一動作錄製**：每段錄製只做一種動作（例如原地重複攻擊同一隻怪 20 次），中間停頓 1 秒以上，對應關係會清楚很多。
 - **控制變因**：走路時分別錄「只往東」、「只往北」，有助辨認座標欄位與方向欄位。
-- **閒置基準**：每段開頭先閒置 10 秒，取得心跳/背景封包的基準，分析時扣除。
-- **記憶體加錄**：除了座標，也監看目標 ID、背包數量、經驗值，因為它們的變化可直接當成事件「真值」來自動產生 `event` 標記（例如經驗值上升 → `mob_killed`）。
+- **閒置基準**：每段開頭先閒置 10 秒，讓判讀時能區分心跳/背景封包。
+- **記憶體加錄**：除了座標，也監看目標 ID、背包數量、經驗值。程式只記錄數值，但判讀時這些變化是很有用的佐證。
+- **事件當下按熱鍵**：怪死了、撿到東西時順手按 F5～F8，標記越多，判讀越準。
 
 ---
 
-## 4. 分析管線（AutoPath 分析模式：`autopath analyze`，模組 `autopath/analysis/`）
+## 4. 判讀流程（程式整理資料，Claude 判讀，使用者確認）
 
 ```
-session zip(s) ─► 1 載入與對齊 ─► 2 自動事件標記 ─► 3 封包分群 ─► 4 時間關聯
+ GameRec 匯出 zip ─► AutoPath 檢視模式（只整理，不下結論）─► 使用者把檔案貼給 Claude
                                                               │
-     profile 產出 ◄─ 7 報告 ◄─ 6 地圖建置 ◄─ 5 欄位推斷 ◄────────┘
+   AutoPath 只使用 confirmed 項目 ◄─ 寫入 profile ◄─ 使用者確認 ◄─ Claude 判讀報告
 ```
 
-| 步驟 | 方法 | 輸出 |
-|---|---|---|
-| 1. 載入與對齊 | 所有串流轉成以 `t_ns` 為索引的 pandas DataFrame；影片幀用 `frames.csv` 對應 | `timeline.parquet` |
-| 2. 自動事件標記 | 依 `actions.yaml` 把輸入轉為 action；依記憶體規則（經驗↑、地圖 ID 變、HP=0）產生 event | `annotations.jsonl`（`source=analyzer`） |
-| 3. 封包分群 | 依前 1～4 bytes 當候選 opcode；長度分佈、方向分群；扣除閒置基準的週期封包 | `opcodes.csv`：opcode、方向、次數、長度、週期性 |
-| 4. 時間關聯 | 對每個 action/event，統計其後 0～500ms 內各 opcode 出現機率 vs. 基準機率，計算 lift、precision、recall、延遲分佈 | `correlation.csv`：`action → opcode, lift, p, latency_ms` |
-| 5. 欄位推斷 | 對已關聯的 opcode，逐 byte offset 嘗試 int16/32、float 解碼，和同時刻記憶體值（座標、目標 ID）算相關係數／完全相等比例；差分欄位（序號、時間戳）自動辨識 | `packets.yaml` 草稿（欄位名、型別、offset、信心度） |
-| 6. 地圖建置 | 依地圖 ID 分組座標軌跡 → 格網化（例如 1 格 = 0.5 遊戲單位）→ 走過的格子為可走、膨脹 1 格後平滑；換圖點記為傳送點；`mob_killed` 位置熱點為刷怪區 | `maps/<id>.json`、熱度圖 png |
-| 7. 報告 | Markdown 報告：關聯表、低信心項目、需要人工確認的清單、建議下一次要補錄什麼 | `analysis_report.md` |
+| 步驟 | 誰做 | 內容 | 輸出 |
+|---|---|---|---|
+| 1. 對齊時間軸 | AutoPath（`autopath view`） | 所有串流依 `t_ns` 合併；影片幀用 `frames.csv` 對應 | `timeline.csv`（一行一事件，依時間排序） |
+| 2. 整理原始資料 | AutoPath | 只做無判斷的整理：每個標記前後 N 秒內的輸入、封包、記憶體變化列表；依方向與長度列出封包；**不計算關聯、不推斷欄位** | `around_markers.md`、`packets_by_len.csv` |
+| 3. 判讀 | Claude | 使用者把 zip（或第 2 步的檔案）貼來，Claude 判讀哪些封包、記憶體變化對應哪個操作，並標出不確定的地方與建議補錄的動作 | 判讀報告（含信心說明） |
+| 4. 確認 | 使用者 | 檢查判讀結果，必要時補錄驗證 | — |
+| 5. 寫入設定檔 | 使用者／Claude | 確認的項目寫入 `packets.yaml`、`memory.yaml`，每筆標 `status: confirmed` 和確認日期 | profile |
+| 6. 地圖建置 | AutoPath | 依地圖 ID 分組座標軌跡（座標是使用者確認過的記憶體位址，屬直接讀值）→ 格網化 → 走過的格子為可走；換圖點、刷怪區由使用者標記決定 | `maps/<id>.json` |
 
-> 封包若加密或壓縮，步驟 5 會失敗；此時以**記憶體狀態為主要感知來源**，封包僅用於時間關聯（知道「何時送出」即可驗證動作是否被伺服器接受）。這不影響 Bot 運作，因為 Bot 只讀記憶體、用鍵鼠輸入。
+> AutoPath 在巡路時**只使用 `status: confirmed` 的項目**。未確認或缺少的項目一律不用，寧可功能少一點也不冒錯誤操作的風險。
+> 封包若加密或壓縮看不懂也沒關係：巡路只靠記憶體讀值與鍵鼠輸入，封包只是判讀時的參考資料。
 
 ---
 
@@ -216,7 +226,7 @@ session zip(s) ─► 1 載入與對齊 ─► 2 自動事件標記 ─► 3 封
 profiles/<game>/
   profile.yaml        # 名稱、支援版本清單、視窗標題、時間設定
   memory.yaml         # 位址定義：AOB 簽章 + 指標鏈 + 型別 + 驗證規則
-  packets.yaml        # opcode 與欄位定義（分析產出 + 人工確認）
+  packets.yaml        # opcode 與欄位定義（Claude 判讀 + 使用者確認，每筆 status: confirmed）
   actions.yaml        # 動作 ↔ 按鍵對照
   maps/<map_id>.json  # 格網、路點、傳送點、刷怪區
   routes/<name>.yaml  # 刷圖路線（循環路點、目標怪清單、停留條件）
@@ -419,13 +429,13 @@ LOOT.tick:
 - 每次通過的簽章結果與周圍 bytes 存入 `profiles/<game>/sigdb/<version>.json`，作為下次模糊比對依據。
 
 ### 7.3 封包：opcode 重新對應
-- `regression/` 中每個動作保留一段短錄製。更新後在新版本重錄同樣動作（照「控制變因」腳本做 1～2 分鐘），執行 `autopath analyze remap --old <舊 session> --new <新 session>`：依動作關聯與長度分佈自動配對舊 opcode → 新 opcode，產生差異報告。
+- `regression/` 中每個動作保留一段短錄製。更新後在新版本重錄同樣動作（照「控制變因」腳本做 1～2 分鐘），把新舊兩份匯出檔一起交給 Claude 比對，判讀 opcode 是否變動；使用者確認後更新 `packets.yaml`。程式本身不自動配對。
 - 因為 Bot 主要靠記憶體與鍵鼠，封包變動通常**不會讓 Bot 失效**，只影響「動作確認」這個輔助功能；可先停用封包確認繼續運作。
 
 ### 7.4 回歸測試
 - `pytest -m regression`：用 `regression/` 中的錄製重播，驗證：
   - 位址解析後的數值與錄製時一致（座標軌跡、HP）。
-  - 自動標記結果與已確認的標記一致（precision/recall 門檻）。
+  - 依 `actions.yaml` 照表轉換的動作名稱與錄製時一致。
   - 尋路在各地圖上能從 A 走到 B（純離線計算）。
 - 遊戲更新 SOP 結束前必須全部通過。
 
@@ -434,7 +444,7 @@ LOOT.tick:
 1. 啟動 GameRec 或 AutoPath → 看到「版本不符」提示。
 2. `autopath profile rescan` → 大部分簽章自動通過。
 3. 失敗的簽章：看候選清單 → 用掃描器確認 → `make-sig` 重建。
-4. 錄一段 2 分鐘的「標準動作腳本」→ `remap` 封包。
+4. 錄一段 2 分鐘的「標準動作腳本」→ 新舊匯出檔交給 Claude 比對封包 → 使用者確認後更新。
 5. 跑回歸測試 → 全部通過。
 6. 更新 `CHANGELOG.md`、`game_versions`，git commit（profile 有版本歷史，可隨時回復）。
 7. Bot `--dry-run` 5 分鐘確認判讀正確 → 正式使用。
@@ -450,7 +460,7 @@ LOOT.tick:
 
 | 模組 | 職責 | 主要套件 |
 |---|---|---|
-| `gamerec/annotate/auto.py` | 輸入/記憶體 → 自動動作標記，寫 `annotations.jsonl` | 標準庫 |
+| `gamerec/annotate/keymap.py` | 依使用者的 `actions.yaml` 把按鍵照表轉為動作名稱（不推測），寫 `annotations.jsonl` | 標準庫 |
 | `gamerec/annotate/ui.py` | 事後標記視窗（影片＋時間軸） | tkinter, opencv |
 | `gamerec/fingerprint.py` | 遊戲版本指紋寫入 manifest | pefile（或 pywin32） |
 | `gamerec/memory/watcher.py` | 監看清單新增 `signature` 型位址（透過 gamecommon 解析） | pymem |
@@ -460,9 +470,9 @@ LOOT.tick:
 
 | 模組 | 職責 | 主要套件 |
 |---|---|---|
-| `autopath/cli.py`、`autopath/ui/` | 三個模式：`analyze`、`profile`、`run`；GUI 先做「選 profile／路線 → dry-run → 開始／F12 停止」 | argparse, tkinter |
-| `autopath/analysis/` | 對齊、封包分群、時間關聯、欄位推斷、地圖建置、報告 | pandas, numpy |
-| `autopath/profile/sigtools.py` | 簽章重掃、產生、模糊比對、`remap` | 標準庫（必要時 capstone） |
+| `autopath/cli.py`、`autopath/ui/` | 三個模式：`view`、`profile`、`run`；GUI 先做「選 profile／路線 → dry-run → 開始／F12 停止」 | argparse, tkinter |
+| `autopath/view/` | 時間軸對齊、原始資料整理（不做關聯判斷）、地圖建置 | pandas, numpy |
+| `autopath/profile/sigtools.py` | 簽章重掃、產生、模糊比對 | 標準庫（必要時 capstone） |
 | `autopath/bot/world.py` | WorldState 讀取 | pymem |
 | `autopath/bot/fsm.py` | 狀態機與各 Behavior | 標準庫 |
 | `autopath/bot/nav.py` | A*、路點、平滑、脫困、地圖學習 overlay | numpy |
@@ -493,7 +503,8 @@ LOOT.tick:
 
 | 風險 | 影響 | 緩解 |
 |---|---|---|
-| 封包加密，無法推斷欄位 | 封包分析價值降低 | 以記憶體為主；封包只做時間關聯 |
+| 封包加密，看不懂內容 | 封包判讀價值降低 | 巡路只靠記憶體與鍵鼠；封包僅供參考 |
+| 錯誤的對應關係被寫進設定檔 | Bot 誤判 | 程式不自動判斷；只用使用者確認過（`confirmed`）的項目 |
 | 找不到實體清單（附近怪物/物品） | 無法精準選怪 | 先用「Tab 選怪鍵 + 目標 ID 記憶體」替代；或畫面偵測（後續） |
 | 點地移動的座標換算不準 | 移動偏差 | 從錄製迴歸求矩陣，並以閉環修正 |
 | 誤操作（狂按、亂點） | 角色死亡或物品損失 | dry-run 先行、速率上限、強制停止鍵（含不可改的備用鍵）、看門狗 |
@@ -504,7 +515,7 @@ LOOT.tick:
 
 ## 10. 建議下一步
 
-1. **M2.5（程式一 GameRec 擴充）**：實作 `annotations.jsonl`、自動標記器、`F5`～`F8` 事件熱鍵、版本指紋；抽出 `gamecommon/`。
+1. **M2.5（程式一 GameRec 擴充）**：實作 `annotations.jsonl`、按鍵照表轉換、`F5`～`F8` 事件熱鍵、版本指紋；抽出 `gamecommon/`。
 2. 使用者依 3.5 的建議錄 P2 資料，上傳 zip。
-3. **M3（程式二 AutoPath 骨架＋分析模式）**：`autopath analyze` 步驟 1～4（關聯表）先做出來，再做欄位推斷與地圖建置。
+3. **M3（程式二 AutoPath 骨架＋檢視模式）**：`autopath view` 時間軸對齊與原始資料整理，配合 Claude 判讀流程，再做地圖建置。
 4. **M4（AutoPath 設定檔工具＋巡路模式）**：profile loader、AOB 工具，接著 `autopath run --dry-run`，最後才開放實際輸入。

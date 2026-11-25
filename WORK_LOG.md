@@ -10,6 +10,7 @@
 - 已完成：`docs/AUTOFARM_DESIGN.md`（階段 P0～P8、功能/非功能需求、標記規格 v2、分析管線、profile 結構、Bot 架構、維護 SOP、風險）
 - 已完成（2026-11-25 第二輪）：設計改為兩個獨立程式（GameRec 監控 / AutoPath 巡路），加入需求追蹤表；GameRec 在 Linux + Xvfb 試跑 CLI 與 GUI，修正 4 個問題
 - 已完成（2026-11-25 第三輪）：AutoPath 自訂熱鍵設計（§6.6、F12、N8、需求追蹤表）
+- 已完成（2026-11-25 第四輪）：依使用者規則移除程式內的操作↔封包自動關聯與自動推測標記，改為「程式整理原始資料 → Claude 判讀 → 使用者確認 → 只用 confirmed 項目」；未因灰燼紀元測試樣本修改任何程式碼
 - 待處理：使用者確認設計後，實作 M2.5（結構化標記、自動標記器、版本指紋）
 
 ## 修改紀錄
@@ -23,6 +24,7 @@
 | gamerec/ui/app.py | 全域 F9 改經 queue 交給 GUI 執行緒（原本從 pynput 執行緒直接呼叫 tkinter）；FPS/Hz/縮放輸入驗證 | L1 |
 | tests/test_core.py | 新增 2 個抓包健康檢查測試 | L0 |
 | docs/AUTOFARM_DESIGN.md | 新增 AutoPath 自訂熱鍵規格 | L0 |
+| docs/AUTOFARM_DESIGN.md | 移除自動關聯分析與自動事件推測，改為 Claude 判讀流程（§0 判讀原則、P3、F1/F3/F4、§3.1～3.5、§4、§7.3） | L0 |
 
 ## 測試結果
 - pytest：6/6 通過（Python 3.12 與 3.13）；新增的 2 個測試在修正前會失敗（已確認）
