@@ -9,6 +9,7 @@
 ## 進度
 - 已完成：`docs/AUTOFARM_DESIGN.md`（階段 P0～P8、功能/非功能需求、標記規格 v2、分析管線、profile 結構、Bot 架構、維護 SOP、風險）
 - 已完成（2026-11-25 第二輪）：設計改為兩個獨立程式（GameRec 監控 / AutoPath 巡路），加入需求追蹤表；GameRec 在 Linux + Xvfb 試跑 CLI 與 GUI，修正 4 個問題
+- 已完成（2026-11-25 第三輪）：AutoPath 自訂熱鍵設計（§6.6、F12、N8、需求追蹤表）
 - 待處理：使用者確認設計後，實作 M2.5（結構化標記、自動標記器、版本指紋）
 
 ## 修改紀錄
@@ -21,6 +22,7 @@
 | gamerec/cli.py | Ctrl+C 在 Windows 可正常停止（不再無限等待）；`ps` 接 pipe 不報錯 | L1 |
 | gamerec/ui/app.py | 全域 F9 改經 queue 交給 GUI 執行緒（原本從 pynput 執行緒直接呼叫 tkinter）；FPS/Hz/縮放輸入驗證 | L1 |
 | tests/test_core.py | 新增 2 個抓包健康檢查測試 | L0 |
+| docs/AUTOFARM_DESIGN.md | 新增 AutoPath 自訂熱鍵規格 | L0 |
 
 ## 測試結果
 - pytest：6/6 通過（Python 3.12 與 3.13）；新增的 2 個測試在修正前會失敗（已確認）
