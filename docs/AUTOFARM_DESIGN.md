@@ -446,9 +446,10 @@ steps:
   - check_stock:  {item: beacon, min: 1, on_short: stop}                         # R12
   - go_to:        {point: map_device}            # R1，座標定義於 maps/<town>.json
   - interact:     {key: interact, expect: map_ui_open, timeout_s: 3, retry: 2}   # R2
-  - select_map:   {map: "地圖A", method: click_template, confirm: map_id_changed} # R3
+  - select_map:   {region: "區域A", timemark: 8, method: click_template, confirm: map_id_changed} # R3
+  - pick_stage:   {by: chaos_card_rarity, prefer: highest}                       # 6.7.10 #2
   - clear:        {targets: rare, until: all_dead, loot: pet_auto}               # R4，寵物自動拾取＋遊戲過濾器
-  - kill_boss:    {locate: boss_marker, until: boss_dead, max_minutes: 5}        # R5
+  - kill_boss:    {locate: boss_marker, until: boss_dead, watcher: {enabled: true, difficulty: user}}  # R5、6.7.10 #1
   - leave_map:    {method: portal_key, confirm: town_map_id}                     # R6
 on_fail:
   map_ui_open: retry_then_stop
@@ -604,6 +605,30 @@ dodge:
 - GameRec 讀記憶體（開啟遊戲程序）、AutoPath 自動操作，都屬於官方明文禁止的「第三方外掛／掛機工具」範圍，在正式帳號上使用有封號風險；這點無法靠技術手段排除，本設計也不提供規避偵測的功能。
 - 被動抓封包（Npcap 在網卡層抓取，不碰遊戲程序）、螢幕錄影對遊戲程序的接觸最少 **[推論，無官方資料]**，但仍屬第三方程式在同機執行。
 - 背景點擊（PostMessage）是否被遊戲接受、虛擬機是否能執行遊戲，都需要實測 **[未驗證]**。
+
+#### 6.7.10 使用者確認的玩法規則（2026-11-25 第二輪）
+
+| # | 項目 | 使用者決定 | 設計對應 |
+|---|---|---|---|
+| 1 | 界域守望者 | 可挑戰時直接去打；挑戰難度由使用者在程式中設定 | `kill_boss` 新增 `watcher: {enabled: true, difficulty: <使用者設定>}`；GUI 提供難度選單 |
+| 2 | 選哪個關卡 | 依混沌卡牌（Chaos Confusion Card）挑選**稀有度最高**的關卡 | 新增步驟 `pick_stage: {by: chaos_card_rarity, prefer: highest}`；卡牌稀有度的讀取依據（記憶體欄位或畫面上的卡牌框色）需錄製後判讀、使用者確認 |
+| 3 | 賽季玩法 | 挑戰「黑帆」玩法；「征戰」玩法出現時自動開啟 | 新增 `season_events: {black_sail: engage, conquest: auto_open}`；黑帆的堆疊策略見下方 |
+| 4 | 目標怪 | **只打黃名稀有怪** | `targeting.rare` 限定稀有（黃名）；魔法怪（藍名）與一般怪只在擋路時攻擊 |
+| 5 | 近戰／遠程、交戰距離 | 依技能決定，錄製時提供適合方案 | 待錄製技能資料後，由 Claude 提出交戰距離與技能輪替方案供使用者選擇 |
+| 6 | 補血 | 依技能決定，同上 | 同上，與 5 一起提出 |
+| 7 | 背包滿 | 跳出提示 | 偵測背包已滿（依據經確認）→ 暫停 Bot、Windows 通知＋狀態列提示，等使用者處理 |
+| 8 | 寵物撿不到的物品 | 只撿**高稀有度傳奇**與**通貨** | 撿物備援規則：只撿符合「傳奇且高稀有度」或「通貨」的掉落；物品類型與稀有度的判斷依據（掉落標籤顏色或記憶體欄位）需錄製後判讀、使用者確認 |
+
+**黑帆玩法：四種堆疊方案（待交付）**
+使用者要求在黑帆玩法的機制大致確認後，訂出 4 種選擇堆疊方案，目標分別為：
+1. **追憶**（高稀有度）
+2. **碎絮**
+3. **游絲**
+4. **首領**
+
+做法：先蒐集黑帆玩法的公開資料，並請使用者錄製幾輪黑帆的選擇畫面與結果，由 Claude 判讀選項與效果，再整理成 4 份 `profiles/<game>/strategies/black_sail_<目標>.yaml`。AutoPath 在 GUI 中讓使用者選擇目前要用哪一份。在使用者確認之前，Bot 不會自行決定黑帆的選擇。
+
+**尚待使用者回答**：使用的帳號、畫面設定是否固定、電腦規格、停止時的通知方式、錄製時間（見對話中第 9～13 題）。
 
 #### 6.7.7 參考的開源專案（只參考設計，不直接複製程式碼；引用前會確認授權）
 
