@@ -29,8 +29,7 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     result = {}
 
     def follow_prompts():                            # the "player": walks when told to
-        p = dlg.prompt.get()
-        mem.walking = "持續走動" in p or "繞著走" in p
+        mem.walking = dlg.expect == "walk"     # follows the worker's current instruction
         if dlg.finished and "found" not in result:
             result["found"] = {a for a, _ in dlg.scanner.results()}
             result["prompt"] = dlg.prompt.get()

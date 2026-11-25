@@ -36,7 +36,7 @@ def _beep() -> None:
 
 class FinderDialog(tk.Toplevel):
     TIME_SCALE = 1.0  # tests shorten the prompts
-    PREP, STILL, MOVE, GRACE, SAMPLE = 5.0, 3.0, 6.0, 1.5, 0.25
+    PREP, STILL, MOVE, GRACE, SAMPLE = 5.0, 3.0, 6.0, 2.0, 0.25  # GRACE: time to react and stop
 
     def __init__(self, master, app, mem_factory=ProcessMemory) -> None:
         super().__init__(master)
@@ -51,6 +51,7 @@ class FinderDialog(tk.Toplevel):
         self._worker: threading.Thread | None = None
         self._rows: list[int] = []
         self.finished = ""  # last outcome: done | stopped | error
+        self.expect = "still"
         # the finder runs outside any recording, so it gets its own log file
         self.log_path = default_output_dir().parent / "finder.log"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +143,8 @@ class FinderDialog(tk.Toplevel):
         return not self._stop.wait(secs * self.TIME_SCALE)
 
     def _phase(self, text: str, secs: float, info: str = "") -> None:
+        # what the player should be doing right now ("walk" / "still"), set by the worker itself
+        self.expect = "walk" if ("走動" in text and "準備" not in text) or "繞著走" in text else "still"
         self._q.put(("phase", text, info, secs))
 
     def _window(self, mode: str, secs: float) -> bool:
