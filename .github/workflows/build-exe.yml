@@ -56,6 +56,13 @@ jobs:
         run: python scripts/e2e_windows.py exe dist/GameRec.exe
 
       - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
         with:
           name: GameRec-exe
           path: dist/GameRec.exe

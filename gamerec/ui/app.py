@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import time
 import tkinter as tk
 import traceback
@@ -29,6 +30,7 @@ class App(ttk.Frame):
         self.watch: list[WatchEntry] = []
         self._last_mark = 0.0
         self.last_zip: Path | None = None
+        self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
@@ -224,9 +226,16 @@ class App(ttk.Frame):
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("無法開始", str(e))
             return
+        try:
+            rate, fps, scale = self.v_rate.get(), self.v_fps.get(), self.v_scale.get()
+            if rate <= 0 or fps <= 0 or not 0 < scale <= 4:
+                raise ValueError
+        except (tk.TclError, ValueError):
+            messagebox.showerror("設定錯誤", "記憶體 Hz、FPS 需大於 0，縮放需介於 0～4")
+            return
         recs = make_recorders(
             self.watch, network=self.v_net.get(), video=self.v_vid.get(), inputs=self.v_inp.get(),
-            rate_hz=self.v_rate.get(), fps=self.v_fps.get(), scale=self.v_scale.get(),
+            rate_hz=rate, fps=fps, scale=scale,
         )
         if self.v_net.get() and not npcap_installed():
             messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
@@ -236,10 +245,21 @@ class App(ttk.Frame):
         self.session = Session(target, recs, root=self.out_var.get())
         for r in recs:  # F9 also works while the game window has focus
             if r.kind == "input":
-                r.on_key = lambda k: k == "f9" and self.master.after(0, self.mark)
+                # Called on pynput's thread: never touch tkinter here, hand off via a queue.
+                r.on_key = lambda k: k == "f9" and self._hotkeys.put(k)
         self.session.start()
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "disabled", "normal", "normal"
         self._tick()
+        self._poll_hotkeys()
+
+    def _poll_hotkeys(self) -> None:
+        s = self.session
+        if not s or s.stopped:
+            return
+        while not self._hotkeys.empty():
+            self._hotkeys.get_nowait()
+            self.mark()
+        self.after(50, self._poll_hotkeys)
 
     def _tick(self) -> None:
         s = self.session
@@ -300,6 +320,11 @@ def run_gui(smoke_file: str | None = None) -> int:
 
     def report(exc, val, tb):
         text = "".join(traceback.format_exception(exc, val, tb))
+        if smoke_file:  # never block a packaging check on a modal dialog
+            with open(smoke_file, "w", encoding="utf-8") as f:
+                json.dump({"ok": False, "error": str(val), "trace": text}, f, ensure_ascii=False)
+            root.destroy()
+            return
         logging.getLogger("gamerec").error(text)
         try:
             with open(_crash_log(), "a", encoding="utf-8") as f:

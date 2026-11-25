@@ -6,6 +6,8 @@ local port is currently owned by the target (refreshed every second via psutil).
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import time
 
@@ -25,27 +27,40 @@ class PacketCapture(Recorder):
         self._lock = threading.Lock()
 
     def setup(self) -> None:
-        from scapy.all import AsyncSniffer, PcapWriter, conf  # noqa: PLC0415
-
-        if not conf.use_pcap and __import__("sys").platform == "win32":
+        if sys.platform == "win32" and not _npcap_installed():
             raise OSError("Npcap not found - install Npcap (WinPcap compatible mode)")
+        from scapy.all import PcapWriter  # noqa: PLC0415
+
         self._refresh_ports()
-        self._pcap = PcapWriter(str(self.path("network/capture.pcap")), sync=False)
+        self._pcap = PcapWriter(str(self.path("network/capture.pcap")), linktype=1, sync=False)
         self._jsonl = open(self.path("network/packets.jsonl"), "w", encoding="utf-8")
-        # Prefer a kernel BPF filter; fall back to Python-side filtering if it can't compile.
-        self._sniffer = None
-        last_err: Exception | None = None
+        # The sniffer runs in its own thread and would otherwise fail silently (status "ok",
+        # 0 packets). Start it, check it is alive, and retry without a BPF filter if the
+        # filter cannot be compiled (we filter by port in Python anyway).
+        err = None
         for bpf in ("tcp or udp", None):
-            sn = AsyncSniffer(iface=self.iface, filter=bpf, prn=self._on_packet, store=False)
-            sn.start()
-            time.sleep(0.3)
-            if sn.thread is not None and sn.thread.is_alive():
-                self._sniffer, self._bpf = sn, bpf
+            err = self._start_sniffer(bpf)
+            if err is None:
                 break
-            last_err = sn.exception or RuntimeError("sniffer thread exited")
-        if self._sniffer is None:
-            raise OSError(f"cannot start packet capture: {last_err}")
+        if err is not None:
+            raise OSError(f"packet sniffer failed to start: {err}")
         self.extra = {"iface": self.iface or "default", "max_payload": self.max_payload, "bpf": self._bpf}
+
+    def _start_sniffer(self, bpf: str | None) -> str | None:
+        from scapy.all import AsyncSniffer  # noqa: PLC0415
+
+        self._bpf = bpf
+        self._sniffer = AsyncSniffer(iface=self.iface, filter=bpf, prn=self._on_packet, store=False)
+        self._sniffer.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            exc = getattr(self._sniffer, "exception", None)
+            thread = getattr(self._sniffer, "thread", None)
+            if exc is not None or (thread is not None and not thread.is_alive()):
+                self._sniffer = None
+                return f"{type(exc).__name__}: {exc}" if exc else "sniffer thread exited"
+            time.sleep(0.05)
+        return None
 
     def _refresh_ports(self) -> None:
         assert self.session is not None
@@ -59,8 +74,8 @@ class PacketCapture(Recorder):
     def run(self) -> None:
         while not self.stopping:
             self._refresh_ports()
-            if not self._sniffer.thread.is_alive():
-                raise RuntimeError(f"packet sniffer stopped: {self._sniffer.exception}")
+            if self._sniffer is not None and getattr(self._sniffer, "exception", None) is not None:
+                raise OSError(f"packet sniffer stopped: {self._sniffer.exception}")
             self._stop.wait(1.0)
 
     def classify(self, proto: str, sport: int, dport: int) -> str | None:
@@ -83,6 +98,8 @@ class PacketCapture(Recorder):
         direction = self.classify(proto, l4.sport, l4.dport)
         if direction is None:
             return
+        if self._jsonl.closed:
+            return
         payload = bytes(l4.payload)
         rec = {
             "t_ns": self.session.clock.epoch_to_t_ns(float(pkt.time)),
@@ -103,9 +120,17 @@ class PacketCapture(Recorder):
     def teardown(self) -> None:
         if getattr(self, "_sniffer", None):
             try:
-                self._sniffer.stop(join=True)
-            except Exception:  # noqa: BLE001 - already reported by run()
+                self._sniffer.stop()
+            except Exception:  # noqa: BLE001
                 pass
         for fh in ("_pcap", "_jsonl"):
             if getattr(self, fh, None):
                 getattr(self, fh).close()
+
+
+def _npcap_installed() -> bool:
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    return any(
+        os.path.exists(os.path.join(windir, d, "wpcap.dll"))
+        for d in (r"System32\Npcap", "System32")
+    )

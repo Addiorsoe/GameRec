@@ -216,14 +216,40 @@ def run_gui() -> None:
     verify(Path(result["zip"]), expect_markers=1)
 
 
+def _diagnose() -> None:
+    """On a hang: screenshot the desktop, list top-level windows, dump the crash log."""
+    import mss
+    import mss.tools
+
+    out = ROOT / "e2e-artifacts"
+    out.mkdir(exist_ok=True)
+    with mss.mss() as sct:
+        shot = sct.grab(sct.monitors[1])
+        mss.tools.to_png(shot.rgb, shot.size, output=str(out / "hang.png"))
+    try:
+        import win32gui
+
+        titles = []
+        win32gui.EnumWindows(lambda h, _: titles.append(win32gui.GetWindowText(h)) if win32gui.IsWindowVisible(h) else None, None)
+        print("visible windows:", [t for t in titles if t])
+    except Exception as e:  # noqa: BLE001
+        print("window list failed:", e)
+    sys.path.insert(0, str(ROOT))
+    from gamerec.env_check import default_output_dir
+
+    log = default_output_dir().parent / "gamerec_error.log"
+    print("crash log:", log.read_text(encoding="utf-8")[-4000:] if log.exists() else "(none)")
+
+
 def run_smoke(exe: str) -> None:
     out = Path(tempfile.mkdtemp()) / "smoke.json"
     t0 = time.time()
     p = subprocess.Popen([exe, "gui", "--smoke-test", str(out)])
     try:
-        p.wait(timeout=180)
+        p.wait(timeout=90)
     except subprocess.TimeoutExpired:
-        p.kill()
+        _diagnose()
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)])
         raise SystemExit("GUI exe did not exit (hung?)")
     print(f"exe exited {p.returncode} after {time.time() - t0:.1f}s")
     if not out.exists():
