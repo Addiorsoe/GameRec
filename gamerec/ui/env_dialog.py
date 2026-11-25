@@ -92,11 +92,19 @@ class EnvDialog(tk.Toplevel):
         def work():
             try:
                 info = check_update()
-                self.after(0, lambda: self._show_update(info or {}))
+                cb = lambda: self._show_update(info or {})  # noqa: E731
             except Exception:  # noqa: BLE001 - offline or no release yet
-                self.after(0, lambda: self.upd_label.configure(text="ℹ️ 無法檢查新版本（離線或尚未發佈）"))
+                cb = lambda: self.upd_label.configure(text="ℹ️ 無法檢查新版本（離線或尚未發佈）")  # noqa: E731
+            self._safe_after(cb)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _safe_after(self, fn) -> None:
+        """Schedule fn on the Tk thread; ignore if the window was closed meanwhile."""
+        try:
+            self.after(0, fn)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _show_update(self, info: dict) -> None:
         self.update_info = info
@@ -128,13 +136,13 @@ class EnvDialog(tk.Toplevel):
 
         def prog(n, total):
             if total:
-                self.after(0, lambda: self.progress.configure(value=n * 100 / total))
+                self._safe_after(lambda: self.progress.configure(value=n * 100 / total))
 
         def work():
             try:
                 result = fn(prog)
             except Exception as e:  # noqa: BLE001
-                self.after(0, lambda e=e: self._failed(e, fail_url))
+                self._safe_after(lambda e=e: self._failed(e, fail_url))
                 return
 
             def finish():
@@ -143,7 +151,7 @@ class EnvDialog(tk.Toplevel):
                 if on_done:
                     on_done(result)
 
-            self.after(0, finish)
+            self._safe_after(finish)
 
         threading.Thread(target=work, daemon=True).start()
 

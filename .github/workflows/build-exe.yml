@@ -13,6 +13,9 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -26,13 +29,31 @@ jobs:
 
       - name: Test
         run: python -m pytest -q
+        env:
+          PYTHONIOENCODING: utf-8
 
       - name: Smoke test imports (GUI + Windows modules)
         run: python -c "import gamerec.ui.app, gamerec.memory.scanner, gamerec.net.capture, gamerec.video.recorder, gamerec.inputs.logger, win32gui, pymem, scapy.all, cv2, mss, pynput; print('ok')"
 
+      - name: E2E trial run (CLI, from source)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py cli
+
+      - name: E2E trial run (GUI driven, from source)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py gui
+
       - name: Build exe
         run: scripts\build_exe.bat
         shell: cmd
+
+      - name: Packaged exe starts (GUI smoke test)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py smoke dist/GameRec.exe
+
+      - name: E2E trial run (packaged exe)
+        timeout-minutes: 5
+        run: python scripts/e2e_windows.py exe dist/GameRec.exe
 
       - uses: actions/upload-artifact@v4
         with:

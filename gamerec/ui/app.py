@@ -170,6 +170,9 @@ class App(ttk.Frame):
             if len(offs) == 1:
                 return WatchEntry(name=name, type=vtype, module=module.strip(), offset=offs[0])
             return WatchEntry(name=name, type=vtype, module=module.strip(), offsets=offs)
+        if "," in where:  # absolute pointer base + chain: 0x1234,0x10,0x8
+            first, *rest = [int(x.strip(), 0) for x in where.split(",")]
+            return WatchEntry(name=name, type=vtype, address=first, offsets=[0, *rest])
         return WatchEntry(name=name, type=vtype, address=int(where, 0))
 
     @staticmethod
@@ -178,6 +181,8 @@ class App(ttk.Frame):
             return f"{e.module}+" + ",".join(hex(o) for o in e.offsets)
         if e.module:
             return f"{e.module}+{hex(e.offset or 0)}"
+        if e.offsets:
+            return ",".join([hex(e.address or 0), *(hex(o) for o in e.offsets[1:])])
         return hex(e.address or 0)
 
     def _redraw(self) -> None:
@@ -282,7 +287,7 @@ def _crash_log() -> Path:
     return p
 
 
-def run_gui() -> int:
+def run_gui(smoke_file: str | None = None) -> int:
     if is_windows():
         try:  # crisp text on high-DPI screens
             import ctypes
@@ -316,5 +321,30 @@ def run_gui() -> int:
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+    if smoke_file:
+        _arm_smoke(root, app, smoke_file)
     root.mainloop()
     return 0
+
+
+def _arm_smoke(root, app, smoke_file: str) -> None:
+    """Packaging check: prove the window, recorder modules and env checks load, then exit."""
+
+    def finish():
+        info = {"ok": True, "version": __version__}
+        try:
+            import importlib
+
+            for mod in ("cv2", "mss", "numpy", "psutil", "pymem", "pynput.keyboard", "scapy.all",
+                        "gamerec.memory.scanner", "gamerec.net.capture", "gamerec.video.recorder",
+                        "gamerec.inputs.logger"):
+                importlib.import_module(mod)
+            info["processes"] = len(app.proc_box["values"])
+            info["env"] = {c.key: c.ok for c in run_checks()}
+        except Exception as e:  # noqa: BLE001
+            info = {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()}
+        with open(smoke_file, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False)
+        root.destroy()
+
+    root.after(4000, finish)

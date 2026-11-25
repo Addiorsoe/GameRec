@@ -83,17 +83,21 @@ class MemoryReader:
 
 
 def resolve(entry: WatchEntry, reader) -> int:
-    if entry.address is not None and not entry.module:
-        return entry.address
-    base = reader.module_base(entry.module) if entry.module else 0
-    if len(entry.offsets) == 1:
-        return base + entry.offsets[0]
+    """Absolute address of the value.
+
+    base = module base (if module) else absolute address.
+    offsets (pointer chain, Cheat Engine style): [[base+o0]+o1]+...+o_last
+    """
+    base = reader.module_base(entry.module) if entry.module else (entry.address or 0)
     if entry.offsets:
-        # Cheat Engine style: [[base+o0]+o1]+...+o_last
+        if len(entry.offsets) == 1:
+            return base + entry.offsets[0]
         addr = reader.read_ptr(base + entry.offsets[0])
         for off in entry.offsets[1:-1]:
             addr = reader.read_ptr(addr + off)
         return addr + entry.offsets[-1]
+    if entry.module:
+        return base + (entry.offset or 0)
     return base + (entry.offset or 0)
 
 

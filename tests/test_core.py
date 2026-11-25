@@ -47,6 +47,8 @@ def test_resolve_variants():
     assert resolve(WatchEntry("a", address=0x1234), r) == 0x1234
     assert resolve(WatchEntry("b", module="game.exe", offset=0x200), r) == 0x400200
     assert resolve(WatchEntry("c", module="game.exe", offsets=[0x100, 0x10, 0x40]), r) == 0xA040
+    # absolute pointer base: [[0x400100]+0x10]+0x40
+    assert resolve(WatchEntry("d", address=0x400100, offsets=[0, 0x10, 0x40]), r) == 0xA040
 
 
 def test_watchentry_roundtrip():
