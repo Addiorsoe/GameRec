@@ -212,3 +212,16 @@ def test_manifest_lists_missing_streams(tmp_path):
     man = json.loads(zipfile.ZipFile(export_session(s)).read("manifest.json"))
     st = {x["kind"]: x["status"] for x in man["streams"]}
     assert st == {"memory": "not_configured", "network": "disabled", "video": "disabled", "input": "disabled"}
+
+
+def test_video_with_no_frames_is_not_ok(tmp_path, monkeypatch):
+    # Seen on CI: capture stalled for the whole session, yet the stream said "ok count=0".
+    from gamerec.video.recorder import ScreenRecorder
+
+    rec = ScreenRecorder(fps=15, region=(0, 0, 64, 64))
+    monkeypatch.setattr(rec, "setup", lambda: None)
+    monkeypatch.setattr(rec, "run", lambda: rec._stop.wait())
+    s = Session(TARGET, [rec], root=tmp_path)
+    s.start()
+    s.stop()
+    assert rec.status == "error" and "no frames" in rec.error

@@ -43,6 +43,14 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     root.after(20, follow_prompts)
     root.after(30_000, root.destroy)
     root.mainloop()
+    # Free the dialog's Tk variables here, on the Tk thread. Left to the garbage collector they can be
+    # freed later on some other thread (e.g. a recorder thread in the next test), where tkinter blocks
+    # waiting for a main loop that no longer runs: that stalled the video test's capture thread.
+    import gc
+
+    log_name = dlg.log_path.name
+    dlg = app.out_var = None
+    gc.collect()
 
     found = result.get("found", set())
     assert {mem.addr(mem.px), mem.addr(mem.py)} <= found, result
@@ -54,4 +62,4 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     assert report["event"] == "added" and "NOT confirmed" in report["note"]
     assert report["steps"][0]["mode"].startswith("changed while walking")
     assert len(report["added_to_watchlist"]) == len(app.watch)
-    assert dlg.log_path.name == "finder.log"
+    assert log_name == "finder.log"
