@@ -117,9 +117,10 @@ def verify(zpath: Path, expect_markers: int = 0) -> None:
             problems.append("key presses not logged")
 
     # network: Npcap is not on CI runners -> must degrade gracefully, not crash
-    net = st.get("network", {})
-    print(f"network: {net.get('status')} {net.get('error', '')} count={net.get('count')}")
-    if net.get("status") not in ("ok", "unavailable"):
+    # (the GUI unticks "packets" itself when Npcap is missing, so the stream may be absent)
+    net = st.get("network")
+    print(f"network: {net or 'disabled (no Npcap)'}")
+    if net and net.get("status") not in ("ok", "unavailable"):
         problems.append(f"network stream: {net}")
 
     markers = z.read("markers.jsonl").decode().splitlines() if "markers.jsonl" in names else []
