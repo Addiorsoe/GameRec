@@ -59,6 +59,8 @@ def build_manifest(session: Session) -> dict:
             "video/screen.mp4": "window recording",
             "video/frames.csv": "frame,t_ns,left,top,width,height,source(window|screen|region),dup(1=repeated frame to keep real time)",
             "input/events.jsonl": "{t_ns, kind, key|x,y,button..., repeat(true=OS auto-repeat while held)}",
+            "stills/*.jpg": "480 px stills from the video: one per second + one at every key press, mouse press and marker (taken by time only)",
+            "stills/index.csv": "file,t_ns,reason(every_1s|key_down|mouse_down|marker),detail(key / button@x,y / marker label),video_frame",
             "logs/recorder.log": "tool log",
         },
     }
@@ -83,6 +85,8 @@ video/frames.csv       frame,t_ns,left,top,width,height,source,dup（第幾幀�
 input/events.jsonl     鍵盤滑鼠 {"t_ns","kind":"key_down|key_up|mouse_move|mouse_down|mouse_up|scroll",...}
                        "repeat":true 表示按住不放時系統自動重複的按鍵，不是新的一次按下
                        滑鼠 x,y 為螢幕座標；減去 manifest.target.window_rect 的左上角即為視窗內座標
+stills/                影片截圖（寬 480）：每秒一張，加上每次按鍵、按滑鼠、加標記的當下；只依時間擷取，不做判斷
+stills/index.csv       file,t_ns,reason,detail,video_frame（每張圖對應的時間與原始事件）
 logs/recorder.log      工具執行紀錄（出錯時看這裡）
 """
 
@@ -92,6 +96,15 @@ def export_session(session: Session, out_dir: str | Path | None = None, notes: s
         session.stop()
     if notes is not None:
         session.notes = notes
+    if not (session.dir / "stills" / "index.csv").exists():  # re-export (notes edit) keeps them
+        try:
+            from .video.stills import extract_stills
+
+            extract_stills(session.dir, session.duration_ns / 1e9)
+        except Exception:  # noqa: BLE001 - stills are a convenience; the recording itself is intact
+            import logging
+
+            logging.getLogger("gamerec").exception("stills extraction failed")
     manifest = build_manifest(session)
     (session.dir / "README.txt").write_text(README_TXT, encoding="utf-8")
     (session.dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")

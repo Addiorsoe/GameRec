@@ -11,7 +11,7 @@ from ..recorder import Recorder
 class ScreenRecorder(Recorder):
     kind = "video"
 
-    def __init__(self, fps: float = 15.0, scale: float = 0.75, region: tuple[int, int, int, int] | None = None) -> None:
+    def __init__(self, fps: float = 8.0, scale: float = 0.5, region: tuple[int, int, int, int] | None = None) -> None:
         super().__init__()
         self.fps = fps
         self.scale = scale
