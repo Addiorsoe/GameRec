@@ -55,6 +55,15 @@ jobs:
         timeout-minutes: 5
         run: python scripts/e2e_windows.py exe dist/GameRec.exe
 
+      - name: Diagnose with a console build (on failure)
+        if: failure()
+        timeout-minutes: 8
+        shell: cmd
+        run: |
+          pyinstaller --noconfirm --onefile --console --name GameRecDebug --collect-submodules scapy --collect-submodules pynput --hidden-import win32gui --hidden-import win32process scripts\run_gamerec.py > NUL 2>&1
+          dist\GameRecDebug.exe gui --smoke-test smoke-debug.json
+          type smoke-debug.json
+
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
