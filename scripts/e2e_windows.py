@@ -120,7 +120,7 @@ def verify(zpath: Path, expect_markers: int = 0) -> None:
     # (the GUI unticks "packets" itself when Npcap is missing, so the stream may be absent)
     net = st.get("network")
     print(f"network: {net or 'disabled (no Npcap)'}")
-    if net and net.get("status") not in ("ok", "unavailable"):
+    if net and net.get("status") not in ("ok", "unavailable", "disabled"):
         problems.append(f"network stream: {net}")
 
     markers = z.read("markers.jsonl").decode().splitlines() if "markers.jsonl" in names else []
@@ -196,6 +196,15 @@ def run_gui() -> None:
     a = appmod.App(root)
     a.out_var.set(str(tmp / "sessions"))
     a.refresh_processes()
+    # empty watch list: must ask before recording; answering "no" must not start anything
+    asked = []
+    messagebox.askyesno = lambda *a_, **k: asked.append(a_[0]) or False
+    a.proc_var.set(f"python.exe  [{info['pid']}]")
+    a.start()
+    if not asked or a.session is not None:
+        raise SystemExit(f"empty watch list did not ask before recording (asked={asked}, session={a.session})")
+    print(f"empty-list warning OK: {asked[0]}")
+    messagebox.askyesno = lambda *a_, **k: False
     for name, vtype, where in (
         ("counter", "int32", hex(info["counter"])),
         ("hp", "int32", hex(info["hp"])),

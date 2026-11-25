@@ -40,6 +40,7 @@ class App(ttk.Frame):
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
         self._hk_paused = False
         self._busy = False  # True while starting/stopping: hotkeys must not re-enter
+        self._empty_watch_ok = False  # user confirmed recording without memory values this run
         self.locked: TargetInfo | None = None  # set by the lock-target hotkey
         self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
@@ -47,6 +48,7 @@ class App(ttk.Frame):
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
         self._build()
+        self._redraw()
         self.refresh_processes()
         self._start_hotkeys()
         self.after(300, self.check_environment)
@@ -84,6 +86,8 @@ class App(ttk.Frame):
         ttk.Button(bar, text="匯入 JSON", command=self.load_watch).pack(side="left")
         ttk.Button(bar, text="另存 JSON", command=self.save_watch).pack(side="left", padx=4)
         ttk.Label(bar, text="位址格式：0x1234ABCD ｜ game.exe+0x2233F0 ｜ game.exe+0x1F00A0,0x10,0x48").pack(side="left", padx=8)
+        self.watch_hint = tk.StringVar()
+        ttk.Label(mem, textvariable=self.watch_hint, foreground="#a00").grid(row=3, column=0, columnspan=6, sticky="w")
         mem.columnconfigure(2, weight=1)
         mem.rowconfigure(0, weight=1)
 
@@ -93,7 +97,7 @@ class App(ttk.Frame):
         ttk.Checkbutton(opt, text="封包", variable=self.v_net).grid(row=0, column=0)
         ttk.Checkbutton(opt, text="錄影", variable=self.v_vid).grid(row=0, column=1)
         ttk.Checkbutton(opt, text="鍵鼠輸入", variable=self.v_inp).grid(row=0, column=2)
-        self.v_rate, self.v_fps, self.v_scale = tk.DoubleVar(value=30), tk.DoubleVar(value=15), tk.DoubleVar(value=1.0)
+        self.v_rate, self.v_fps, self.v_scale = tk.DoubleVar(value=30), tk.DoubleVar(value=15), tk.DoubleVar(value=0.75)
         for i, (lbl, var) in enumerate((("記憶體 Hz", self.v_rate), ("FPS", self.v_fps), ("縮放", self.v_scale))):
             ttk.Label(opt, text=lbl).grid(row=0, column=3 + i * 2, padx=(10, 2))
             ttk.Entry(opt, textvariable=var, width=6).grid(row=0, column=4 + i * 2)
@@ -260,6 +264,7 @@ class App(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for e in self.watch:
             self.tree.insert("", "end", values=(e.name, e.type, self.fmt_where(e)))
+        self.watch_hint.set("" if self.watch else "⚠ 清單是空的：錄製時不會記錄任何記憶體數值（例如座標）。請新增位址或「匯入 JSON」。")
 
     def add_watch(self) -> None:
         try:
@@ -329,6 +334,16 @@ class App(ttk.Frame):
         if not recs:
             messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
             return
+        if not self.watch and not self._empty_watch_ok:
+            # asked before recording starts (not during), once per run
+            if not messagebox.askyesno(
+                "記憶體監看清單是空的",
+                "這次錄製不會記錄任何記憶體數值（例如角色座標）。\n\n仍要開始嗎？\n"
+                "（選「是」之後，這次開啟程式期間不再提醒）",
+            ):
+                self.status.set("已取消：請先新增監看位址或匯入 JSON")
+                return
+            self._empty_watch_ok = True
         group = self.group_var.get().strip()
         take = next_take(self.out_var.get(), group) if group else None
         if self.last_zip is not None and self.notes_var.get() == self._saved_notes:

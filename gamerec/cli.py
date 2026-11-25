@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seconds", type=float, default=0, help="錄製秒數，0 = 直到 Ctrl+C")
     r.add_argument("--rate", type=float, default=30.0, help="記憶體取樣 Hz")
     r.add_argument("--fps", type=float, default=15.0)
-    r.add_argument("--scale", type=float, default=1.0, help="影片縮放比例")
+    r.add_argument("--scale", type=float, default=0.75, help="影片縮放比例（0.75：文字仍清楚、檔案約為 1.0 的一半）")
     r.add_argument("--iface", help="網卡名稱（預設自動）")
     r.add_argument("--no-network", action="store_true")
     r.add_argument("--no-video", action="store_true")

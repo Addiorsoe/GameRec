@@ -119,7 +119,7 @@ logs/recorder.log
 }
 ```
 
-設計原則：純文字（CSV/JSONL）優先，Claude 能直接讀；影片控制在 15 FPS、可選縮放，
+設計原則：純文字（CSV/JSONL）優先，Claude 能直接讀；影片控制在 15 FPS、預設縮放 0.75（實測 1920×1008 遊戲畫面約 1.2 MB/s，小字仍可讀），
 讓 zip 大小合理（約 1～3 MB/分鐘）。
 
 ## 5. 介面（tkinter）
