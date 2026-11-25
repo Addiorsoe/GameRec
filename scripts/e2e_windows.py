@@ -281,6 +281,13 @@ def _diagnose() -> None:
         titles = []
         win32gui.EnumWindows(lambda h, _: titles.append(win32gui.GetWindowText(h)) if win32gui.IsWindowVisible(h) else None, None)
         print("visible windows:", [t for t in titles if t])
+        # PyInstaller's "Unhandled exception in script" dialog: print its text (the traceback)
+        def dump(h, _):
+            if "exception" in win32gui.GetWindowText(h).lower():
+                kids = []
+                win32gui.EnumChildWindows(h, lambda c, _: kids.append(win32gui.GetWindowText(c)), None)
+                print("EXCEPTION DIALOG:\n" + "\n".join(k for k in kids if k))
+        win32gui.EnumWindows(dump, None)
     except Exception as e:  # noqa: BLE001
         print("window list failed:", e)
     sys.path.insert(0, str(ROOT))
