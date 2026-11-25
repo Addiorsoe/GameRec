@@ -50,6 +50,7 @@
 | 從開始到投入使用的完整流程與需求 | 兩者 | §1、§2 |
 | 隨遊戲更新一併更新或方便維護 | 兩者（共用 profile） | §5、§7 |
 | 自訂熱鍵（組合鍵、滑鼠恢復預設、保留強制停止鍵、禁止重複綁定） | 兩者（AutoPath 規格見本文件；GameRec 依同一份規格） | §6.6、F12、N8 |
+| 刷圖流程：互動點 → 選地圖 → 清稀有怪 → 打頭目 → 離開；躲避危險地面與招式、技能閃避 | AutoPath | §6.7 |
 
 ## 0.2 總覽
 
@@ -414,6 +415,124 @@ LOOT.tick:
 
 ---
 
+### 6.7 目標玩法：地圖刷怪流程（使用者需求統整）
+
+**流程**：前往特定互動點 → 互動 → 開啟地圖選擇介面 → 選擇地圖並開始 → 進入地圖後以**稀有怪**為目標全部擊殺 → 前往**頭目**擊殺 → 離開地圖 →（循環）。全程要**躲避危險地面與招式**，可以用**技能閃躲**。
+
+#### 6.7.1 需求明細
+
+| 編號 | 需求 | 驗收條件 |
+|---|---|---|
+| R1 | 從目前位置自動走到指定互動點（NPC／地圖裝置） | 互動點座標寫在 profile，抵達距離 < 容許值，卡住會脫困 |
+| R2 | 與互動點互動並開啟地圖選擇介面 | 互動後在 N 秒內確認介面已開啟（依已確認的記憶體旗標或畫面範本），失敗重試 2 次後停止 |
+| R3 | 在介面中選擇指定地圖並開始 | 地圖清單、點選位置或按鍵順序寫在 profile；確認已進入地圖（地圖 ID 改變）才往下走 |
+| R4 | 地圖內搜尋並擊殺**所有稀有怪** | 稀有怪的判斷依據（記憶體中的怪物等級欄位，或畫面上的名牌顏色）必須是使用者確認過的；全部擊殺或達到時間上限才進入下一步 |
+| R5 | 稀有怪清完後前往**頭目**並擊殺 | 頭目位置或判斷方式寫在 profile；頭目死亡（已確認的判斷依據）才進入下一步 |
+| R6 | 離開地圖 | 使用離開方式（傳送門／按鍵／回城）並確認回到城鎮地圖 ID |
+| R7 | 循環執行，並可設定次數或時間上限 | 每輪結果（耗時、擊殺數、失敗原因）寫入 `bot_log.jsonl` |
+| R8 | 躲避**危險地面**（持續型地面效果） | 路徑規劃避開危險格；站在危險格上時優先離開 |
+| R9 | 躲避**招式**（頭目或怪物的範圍攻擊預兆） | 偵測到預兆後在反應時間內離開範圍 |
+| R10 | 可用**技能閃躲**（翻滾、衝刺、瞬移等） | 閃避技能、距離、冷卻寫在 profile；冷卻中改用走的 |
+| R11 | 任何一步失敗都有明確的停止或回復策略 | 例如：介面沒打開就重試，死亡就停止或依設定復活，超時就離開地圖 |
+
+#### 6.7.2 流程腳本（`routes/<name>.yaml`，每一步都是可重用的動作）
+
+參考 Koolo「每條路線是一連串 run 步驟」與 Kolbot「戰鬥規則寫在設定檔」的做法：
+
+```yaml
+name: map_farm
+loop: {max_runs: 50, max_minutes: 120}
+steps:
+  - go_to:        {point: map_device}            # R1，座標定義於 maps/<town>.json
+  - interact:     {key: interact, expect: map_ui_open, timeout_s: 3, retry: 2}   # R2
+  - select_map:   {map: "地圖A", method: click_template, confirm: map_id_changed} # R3
+  - clear:        {targets: rare, until: all_dead, max_minutes: 8}               # R4
+  - kill_boss:    {locate: boss_marker, until: boss_dead, max_minutes: 5}        # R5
+  - leave_map:    {method: portal_key, confirm: town_map_id}                     # R6
+on_fail:
+  map_ui_open: retry_then_stop
+  player_died: stop
+  timeout:     leave_map
+```
+
+#### 6.7.3 決策：行為樹（取代單純狀態機）
+
+這個玩法有明確的優先順序，用行為樹（參考 `py_trees`）會比單一狀態機好寫好改。每個 tick 從上往下找第一個成立的分支：
+
+```
+Selector（由上往下，先成立先做）
+├─ 1. 安全：強制停止／看門狗／版本鎖 ………………… 停止
+├─ 2. 閃避：自己在危險區內，或偵測到招式預兆 ……… 閃避（技能 or 走）
+├─ 3. 補給：HP 低於門檻 ……………………………………… 喝水／後退
+├─ 4. 戰鬥：攻擊範圍內有目標（稀有怪 or 頭目）…… 技能輪替
+├─ 5. 撿物：附近有符合規則的掉落 …………………… 撿取
+└─ 6. 流程：執行 route 的目前步驟 ………………… 走路／互動／選圖／找下一隻稀有怪／找頭目／離開
+```
+
+閃避永遠排在戰鬥之前，所以打頭目途中遇到招式會先閃再繼續打。
+
+#### 6.7.4 目標挑選規則（參考 Kolbot 的戰鬥設定）
+
+```yaml
+targeting:
+  rare:  {priority: 1}                 # 稀有怪優先
+  boss:  {priority: 2, only_after: rare_cleared}
+  normal: {attack: only_if_blocking}   # 一般怪擋路才打
+  skip:  {mob_ids: []}                 # 指定略過的怪
+  max_chase_distance: 30
+```
+
+尋找稀有怪的順序：先打視野內最近的；視野內沒有就沿著「未探索區域」移動（格網上記錄去過的格子），直到全圖探索完或時間到。
+
+#### 6.7.5 危險地面與招式閃避（影響圖做法）
+
+1. **危險格網**：除了可走格網，再維護一張即時的「危險成本圖」。每個 tick 依目前已知的危險物件（位置、半徑或形狀、剩餘時間）更新。
+2. **尋路避開**：A* 的格子成本 = 基本成本 + 危險成本。危險越高越繞，禁止區直接不可走（參考 python-pathfinding 的加權格網）。
+3. **逃離**：自己所在格子的危險值超過門檻時，用 BFS 找最近的安全格：
+   - 走過去來得及（距離 ÷ 移動速度 < 預估命中時間）就用走的。
+   - 來不及，而且閃避技能可用，就朝安全格方向放閃避技能。
+   - 都不行就往危險值最低的方向移動。
+4. **招式預兆**：每種招式定義在 `profiles/<game>/hazards.yaml`，內容是預兆特徵、範圍形狀（圓、扇形、直線）、延遲時間：
+
+```yaml
+hazards:
+  fire_ground:  {type: ground, shape: circle, radius: 4, source: memory_effect_list, effect_id: 1203, status: confirmed}
+  boss_slam:    {type: telegraph, shape: circle, radius: 6, delay_ms: 900, source: memory_cast_id, cast_id: 55, status: unconfirmed}
+dodge:
+  skill_key: space
+  distance: 5
+  cooldown_s: 3
+  fallback: walk
+```
+
+5. **危險資訊從哪裡來**：遵守「程式不自行判斷」的原則，危險物件的來源必須是使用者確認過的（`status: confirmed`）：
+   - **記憶體**：地面效果／技能物件清單、頭目施法 ID（最準、最快）。
+   - **畫面**（備援）：危險地面的顏色或範本比對（參考 Botty 的範本比對）。
+   - 未確認的招式不會被用來觸發閃避，只會在 log 裡記錄。
+
+#### 6.7.6 要先錄下來交給 Claude 判讀的資料
+
+| 用途 | 錄製內容 | 要找出的東西 |
+|---|---|---|
+| R2/R3 | 走到互動點 → 互動 → 打開介面 → 選圖 → 進圖，重複 5 次 | 介面開啟旗標、地圖選擇方式、地圖 ID |
+| R4 | 在地圖中分別靠近一般怪、稀有怪，各按 F5 標記 | 怪物清單位址、怪物等級（稀有）欄位 |
+| R5 | 頭目戰全程，頭目死亡時按 F6 | 頭目判斷方式、頭目 HP／死亡旗標 |
+| R8/R9 | 故意站上危險地面、看頭目放招，各按 F7 標記；每次閃避時按 F8 | 地面效果／施法 ID、範圍、延遲時間 |
+| R10 | 原地放閃避技能 10 次 | 閃避距離、冷卻時間 |
+
+#### 6.7.7 參考的開源專案（只參考設計，不直接複製程式碼；引用前會確認授權）
+
+| 專案 | 參考重點 |
+|---|---|
+| [Koolo](https://beta.pkg.go.dev/github.com/hectorgimenez/koolo)（Go） | 讀記憶體取得世界狀態、地圖格網 A*、每條刷圖路線拆成 run 步驟 |
+| [Kolbot](https://github.com/Fa-b/kolbot)（JavaScript） | 目標挑選與戰鬥設定檔（只打精英／略過特定怪／清完再打頭目） |
+| [Botty](https://kandi.openweaver.com/python/aeon0/botty)（Python） | 畫面範本比對、Python 的路線流程與撿物規則 |
+| [python-pathfinding](https://github.com/brean/python-pathfinding/blob/main/README.md) | 加權格網 A*（危險成本） |
+| [py_trees](https://github.com/stonier/py_trees) | 行為樹的優先順序決策 |
+| [Recast/Detour](https://www.GitHub.com/recastnavigation/recastnavigation) | 大地圖或 3D 地形時改用導航網格與動態障礙 |
+
+---
+
 ## 7. 隨遊戲更新維護的方法
 
 遊戲更新最常壞的是：**位址偏移**（幾乎每次）、**封包 opcode/格式**（有時）、**地圖**（偶爾）。對策如下：
@@ -475,7 +594,10 @@ LOOT.tick:
 | `autopath/profile/sigtools.py` | 簽章重掃、產生、模糊比對 | 標準庫（必要時 capstone） |
 | `autopath/bot/world.py` | WorldState 讀取 | pymem |
 | `autopath/bot/fsm.py` | 狀態機與各 Behavior | 標準庫 |
-| `autopath/bot/nav.py` | A*、路點、平滑、脫困、地圖學習 overlay | numpy |
+| `autopath/bot/nav.py` | A*（含危險成本）、路點、平滑、脫困、未探索區域追蹤、地圖學習 overlay | numpy |
+| `autopath/bot/hazard.py` | 危險成本圖、逃離安全格搜尋、閃避技能決策 | numpy |
+| `autopath/bot/tree.py` | 行為樹（安全 → 閃避 → 補給 → 戰鬥 → 撿物 → 流程） | py_trees（或自寫） |
+| `autopath/bot/steps.py` | 路線步驟：go_to / interact / select_map / clear / kill_boss / leave_map | 標準庫 |
 | `autopath/bot/input.py` | SendInput 鍵鼠驅動、dry-run | ctypes |
 | `autopath/bot/safety.py` | 強制停止（F12＋寫死的備用鍵）、看門狗、速率限制、版本鎖 | pynput |
 | `autopath/ui/hotkeys.py` | 熱鍵設定視窗：錄製組合鍵、即時衝突檢查、滑鼠「恢復預設」 | tkinter |
