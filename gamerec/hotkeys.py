@@ -9,6 +9,8 @@ Rules (shared by GameRec and the future AutoPath bot):
 """
 from __future__ import annotations
 
+import time
+
 import json
 import threading
 from collections.abc import Callable
@@ -28,8 +30,8 @@ class Action:
 
 GAMEREC_ACTIONS = (
     Action("lock_target", "鎖定目前視窗為目標", "f8"),
-    Action("start_stop", "開始 / 停止錄製", "f10"),
-    Action("mark", "加標記", "f9"),
+    Action("start_stop", "開始 / 停止錄製", "f9"),
+    Action("mark", "加標記", "f10"),
 )
 
 # pynput / tk names -> canonical names
@@ -123,6 +125,9 @@ def pynput_key_name(key) -> str:
     return canon_key(name)
 
 
+REPEAT_WINDOW = 1.5  # seconds
+
+
 class ComboTracker:
     """Feed key down/up names; returns the completed combo string on a main-key press.
 
@@ -133,6 +138,7 @@ class ComboTracker:
 
     def __init__(self, modifier_down: Callable[[str], bool] | None = None) -> None:
         self.held: set[str] = set()
+        self.pressed: dict[str, float] = {}  # main key -> time of its last key-down
         self.modifier_down = modifier_down
 
     def down(self, name: str) -> str | None:
@@ -140,13 +146,22 @@ class ComboTracker:
         if name in MODIFIERS:
             self.held.add(name)
             return None
+        # OS auto-repeat while held: one press = one action (otherwise holding F9 would start and
+        # stop over and over). Repeats arrive every ~30 ms after a <=1 s delay; the time limit
+        # means a lost key-up can't leave the key dead.
+        now, last = time.monotonic(), self.pressed.get(name)
+        self.pressed[name] = now
+        if last is not None and now - last < REPEAT_WINDOW:
+            return None
         if self.modifier_down:
             self.held = {m for m in self.held if self.modifier_down(m)}
         mods = sorted(self.held, key=MODIFIERS.index)
         return "+".join([*mods, name])
 
     def up(self, name: str) -> None:
-        self.held.discard(canon_key(name))
+        name = canon_key(name)
+        self.held.discard(name)
+        self.pressed.pop(name, None)
 
 
 def _os_modifier_down():

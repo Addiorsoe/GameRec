@@ -11,7 +11,11 @@ from gamerec.memory.types import decode
 from gamerec.memory.watcher import MemoryWatcher, WatchEntry
 from gamerec.net.capture import PacketCapture
 from gamerec.process import TargetInfo
-from gamerec.session import Session
+from gamerec.session import Session, next_take
+import json
+import zipfile
+
+from gamerec.export import export_session
 
 TARGET = TargetInfo(pid=4242, name="game.exe")
 
@@ -159,3 +163,42 @@ def test_first_packets_of_new_connection_kept(tmp_path):
     pc._jsonl.close()
     lines = (tmp_path / "p.jsonl").read_text().splitlines()
     assert pc.count == 1 and '"sport": 50001' in lines[0]
+
+
+def test_group_take_in_name_and_manifest(tmp_path):
+    assert next_take(tmp_path, "A") == 1
+    (tmp_path / "session_20261125_120000_A-01_game.exe.zip").touch()
+    (tmp_path / "session_20261125_120100_A-07_game.exe").mkdir()
+    (tmp_path / "session_20261125_120200_B-03_game.exe.zip").touch()
+    (tmp_path / "session_20261125_120300_AB-09_game.exe.zip").touch()   # different group
+    assert next_take(tmp_path, "A") == 8 and next_take(tmp_path, "B") == 4 and next_take(tmp_path, "C") == 1
+
+    s = Session(TARGET, [], root=tmp_path, group="A", take=8)
+    s.start()
+    s.stop()
+    assert "_A-08_" in s.name
+    z = export_session(s, notes="first")
+    z2 = export_session(s, out_dir=z.parent, notes="edited later")   # notes added afterwards
+    assert z2 == z
+    man = json.loads(zipfile.ZipFile(z).read("manifest.json"))
+    assert man["group"] == "A" and man["take"] == 8 and man["notes"] == "edited later"
+
+
+def test_held_hotkey_fires_once():
+    # Before: holding F9 sent repeated key-downs, so start/stop toggled over and over.
+    t = ComboTracker()
+    assert t.down("f9") == "f9"
+    assert t.down("f9") is None and t.down("f9") is None   # auto-repeat
+    t.up("f9")
+    assert t.down("f9") == "f9"
+
+
+def test_lost_key_up_does_not_kill_hotkey(monkeypatch):
+    import gamerec.hotkeys as hk
+
+    now = [100.0]
+    monkeypatch.setattr(hk.time, "monotonic", lambda: now[0])
+    t = ComboTracker()
+    assert t.down("f9") == "f9"        # key-up never arrives
+    now[0] += 2.0
+    assert t.down("f9") == "f9"        # next real press still works

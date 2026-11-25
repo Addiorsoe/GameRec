@@ -28,6 +28,8 @@ def build_manifest(session: Session) -> dict:
         "target": getattr(session, "target_snapshot", None) or session.target.to_dict(),
         "streams": [r.describe() for r in session.recorders],
         "markers": len(session.markers),
+        "group": getattr(session, "group", "") or None,
+        "take": getattr(session, "take", None),
         "notes": session.notes,
         "files": {
             "markers.jsonl": "user markers: {t_ns, label}",
@@ -49,7 +51,7 @@ README_TXT = """GameRec 錄製資料說明 / GameRec session data
          同一個 t_ns 代表同一個瞬間，可用來對齊記憶體、封包、畫面與按鍵。
 Timeline: every file uses t_ns = nanoseconds since the session started.
 
-manifest.json          本次錄製摘要：目標程式、視窗位置、各資料流狀態與筆數、備註
+manifest.json          本次錄製摘要：目標程式、視窗位置、各資料流狀態與筆數、組別（group）、該組第幾段（take）、備註（notes）
 markers.jsonl          使用者標記  {"t_ns", "label"}
 memory/samples.csv     記憶體數值  t_ns,name,value（只在數值改變時記錄；空白=讀不到）
 memory/watchlist.json  監看位址清單（含實際解析出的位址 resolved）

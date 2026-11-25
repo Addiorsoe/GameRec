@@ -20,9 +20,12 @@ from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry, load_watchlist
 from ..process import TargetInfo, get_target, list_processes, target_from_foreground
-from ..session import Session
+from ..session import Session, next_take
 
 TYPES = ["int32", "uint32", "int16", "int64", "float", "double", "uint8", "bytes:16"]
+
+
+GROUPS = ("A", "B", "C", "D", "E", "F", "G")
 
 
 class App(ttk.Frame):
@@ -33,6 +36,7 @@ class App(ttk.Frame):
         self.watch: list[WatchEntry] = []
         self._last_mark = 0.0
         self.last_zip: Path | None = None
+        self._saved_notes = ""
         self._hotkeys: queue.Queue[str] = queue.Queue()  # filled by the global key hook thread
         self._hk_paused = False
         self._busy = False  # True while starting/stopping: hotkeys must not re-enter
@@ -109,8 +113,24 @@ class App(ttk.Frame):
         ttk.Button(out, text="選擇…", command=self.pick_out).pack(side="left")
         ttk.Button(out, text="開啟", command=lambda: self._open(self.out_var.get())).pack(side="left", padx=2)
 
+        rec = ttk.LabelFrame(self, text="本次錄製（一段錄一個動作，每段各自匯出一個 zip）", padding=6)
+        rec.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(rec, text="組別").grid(row=0, column=0, sticky="w")
+        self.group_var = tk.StringVar()
+        ttk.Combobox(rec, textvariable=self.group_var, values=GROUPS, width=8).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(rec, text="檔名會加上組別與流水號，例如 _A-03_", foreground="#555").grid(row=0, column=2, columnspan=2, sticky="w")
+        ttk.Label(rec, text="備註").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.notes_var = tk.StringVar()
+        ttk.Entry(rec, textvariable=self.notes_var).grid(row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        self.b_notes = ttk.Button(rec, text="更新上一段的備註", command=self.save_notes, state="disabled")
+        self.b_notes.grid(row=1, column=3, sticky="e", pady=(4, 0))
+        self.last_var = tk.StringVar(value="錄製前可先填備註；停止時不會跳出視窗，事後也能補寫再按「更新上一段的備註」。")
+        ttk.Label(rec, textvariable=self.last_var, foreground="#555", wraplength=760).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        rec.columnconfigure(2, weight=1)
+
         ctl = ttk.Frame(self, padding=(0, 6))
-        ctl.grid(row=3, column=0, sticky="ew")
+        ctl.grid(row=4, column=0, sticky="ew")
         self.b_start = ttk.Button(ctl, text="● 開始", command=self.start)
         self.b_mark = ttk.Button(ctl, text="加標記", command=self.mark, state="disabled")
         self.b_stop = ttk.Button(ctl, text="■ 停止並匯出", command=self.stop, state="disabled")
@@ -122,7 +142,7 @@ class App(ttk.Frame):
         self.hk_hint = tk.StringVar()
         ttk.Label(ctl, textvariable=self.hk_hint, foreground="#a00").pack(side="right", padx=6)
         self.status = tk.StringVar(value="就緒")
-        ttk.Label(self, textvariable=self.status, foreground="#555").grid(row=4, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.status, foreground="#555").grid(row=5, column=0, sticky="w")
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -309,8 +329,13 @@ class App(ttk.Frame):
         if not recs:
             messagebox.showerror("無法開始", "沒有任何可記錄的項目：請新增監看位址或勾選封包/錄影/鍵鼠。")
             return
-        self.session = Session(target, recs, root=self.out_var.get())
+        group = self.group_var.get().strip()
+        take = next_take(self.out_var.get(), group) if group else None
+        if self.last_zip is not None and self.notes_var.get() == self._saved_notes:
+            self.notes_var.set("")  # the previous segment's note is already saved with it
+        self.session = Session(target, recs, root=self.out_var.get(), group=group, take=take)
         self.session.start()
+        self.b_notes["state"] = "disabled"
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "disabled", "normal", "normal"
         self._tick()
 
@@ -340,7 +365,7 @@ class App(ttk.Frame):
         recording = bool(self.session and self.session.started and not self.session.stopped)
         if action == "force_stop":
             if recording:
-                self.stop(ask=False, notes="（使用強制停止鍵結束）")
+                self.stop(forced=True)
         elif action == "mark" and recording:
             self.mark()
         elif action == "lock_target" and not recording:
@@ -383,27 +408,38 @@ class App(ttk.Frame):
             self.mark_var.set("")
             self.status.set(f"已加標記 @ {m['t_ns'] / 1e9:.2f}s：{m['label']}")
 
-    def stop(self, ask: bool = True, notes: str = "") -> None:
-        """Stop and export. ask=False (force-stop key) skips every dialog."""
+    def stop(self, forced: bool = False) -> None:
+        """Stop and export right away. No dialog: it would steal focus from the game."""
         if self._busy or not self.session or self.session.stopped:
             return
         self._busy = True
         try:
-            # stop recording first: typing the notes must not end up in the recording
             self.session.stop()
             self.status.set("已停止，正在匯出…")
             self.update_idletasks()
-            if ask:
-                notes = _ask_text(self.master, "匯出備註", "這段錄影在做什麼？（例如：從城鎮走到 A 點，途中按 W 前進）") or ""
+            notes = self.notes_var.get().strip()
+            if forced:
+                notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
             zpath = export_session(self.session, notes=notes)
         finally:
             self._busy = False
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "normal", "disabled", "disabled"
-        summary = "\n".join(f"{k}: {st} ({n})" for k, (st, n) in self.session.stats().items())
-        self.status.set(f"已匯出 {zpath}")
-        self.last_zip = zpath
-        if ask and messagebox.askyesno("匯出完成", f"{zpath}\n\n{summary}\n\n把這個 zip 交給 Claude 分析即可。\n要開啟所在資料夾嗎？"):
-            open_folder(zpath.parent)
+        self.last_zip, self._saved_notes = zpath, self.notes_var.get()
+        self.b_notes["state"] = "normal"
+        summary = "，".join(f"{k} {st} {n}" for k, (st, n) in self.session.stats().items())
+        self.status.set(f"已匯出 {zpath.name}")
+        self.last_var.set(f"上一段：{zpath.name}（{summary}）")
+
+    def save_notes(self) -> None:
+        """Rewrite the last segment's zip with the note typed afterwards."""
+        if self._busy or not self.session or not self.session.stopped or self.last_zip is None:
+            return
+        notes = self.notes_var.get().strip()
+        if self.session.notes.endswith("（使用強制停止鍵結束）"):
+            notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
+        self.last_zip = export_session(self.session, out_dir=self.last_zip.parent, notes=notes)
+        self._saved_notes = self.notes_var.get()
+        self.status.set(f"已更新備註：{self.last_zip.name}")
 
 
 def _scan_hardware_once() -> None:
@@ -413,12 +449,6 @@ def _scan_hardware_once() -> None:
         load_or_scan()
     except Exception:  # noqa: BLE001 - specs are informational, never block the app
         logging.getLogger("gamerec").exception("hardware scan failed")
-
-
-def _ask_text(master, title: str, prompt: str) -> str | None:
-    from tkinter import simpledialog
-
-    return simpledialog.askstring(title, prompt, parent=master)
 
 
 def _crash_log() -> Path:

@@ -16,12 +16,18 @@ log = logging.getLogger("gamerec")
 
 
 class Session:
-    def __init__(self, target: TargetInfo, recorders: list[Recorder], root: str | Path = "sessions") -> None:
+    def __init__(self, target: TargetInfo, recorders: list[Recorder], root: str | Path = "sessions",
+                 group: str = "", take: int | None = None) -> None:
         self.target = target
         self.recorders = recorders
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = re.sub(r"[^\w.-]+", "_", target.name)
-        self.name = f"session_{stamp}_{safe}"
+        self.group = group.strip()
+        self.take = take
+        label = ""
+        if self.group:  # e.g. session_20261125_120000_A-03_game.exe
+            label = re.sub(r"[^\w.-]+", "_", self.group) + (f"-{take:02d}" if take else "") + "_"
+        self.name = f"session_{stamp}_{label}{safe}"
         self.dir = Path(root) / self.name
         self.clock: SessionClock | None = None
         self.started = False
@@ -80,3 +86,14 @@ class Session:
 
     def stats(self) -> dict[str, tuple[str, int]]:
         return {r.kind: (r.status, r.count) for r in self.recorders}
+
+
+def next_take(out_dir: str | Path, group: str) -> int:
+    """Running number for this group: 1 + highest _<group>-NN_ already in the output folder."""
+    tag = re.sub(r"[^\w.-]+", "_", group)
+    pat = re.compile(rf"^session_\d{{8}}_\d{{6}}_{re.escape(tag)}-(\d+)_")
+    try:
+        nums = [int(m.group(1)) for p in Path(out_dir).iterdir() if (m := pat.match(p.name))]
+    except OSError:
+        nums = []
+    return max(nums, default=0) + 1

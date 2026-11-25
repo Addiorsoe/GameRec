@@ -32,17 +32,17 @@ def test_persist_and_restore(tmp_path):
     cfg.set("mark", "shift+f2")
     assert HotkeyConfig(path=p).bindings["mark"] == "shift+f2"
     cfg.restore_defaults()
-    assert HotkeyConfig(path=p).bindings == {"lock_target": "f8", "start_stop": "f10", "mark": "f9"}
+    assert HotkeyConfig(path=p).bindings == {"lock_target": "f8", "start_stop": "f9", "mark": "f10"}
 
 
 def test_corrupt_file_falls_back_to_defaults(tmp_path):
     p = tmp_path / "hk.json"
     p.write_text(json.dumps({"mark": "f10", "start_stop": "f10"}))   # duplicate
-    assert HotkeyConfig(path=p).bindings == {"lock_target": "f8", "start_stop": "f10", "mark": "f9"}
+    assert HotkeyConfig(path=p).bindings == {"lock_target": "f8", "start_stop": "f9", "mark": "f10"}
     p.write_text(json.dumps({"mark": FORCE_STOP}))
-    assert HotkeyConfig(path=p).bindings["mark"] == "f9"
+    assert HotkeyConfig(path=p).bindings["mark"] == "f10"
     p.write_text("not json")
-    assert HotkeyConfig(path=p).bindings["mark"] == "f9"
+    assert HotkeyConfig(path=p).bindings["mark"] == "f10"
 
 
 def test_combo_tracker():
@@ -52,5 +52,6 @@ def test_combo_tracker():
     assert t.down("end") == FORCE_STOP
     t.up("alt_l")
     assert t.down("f9") == "ctrl+f9"
+    t.up("f9")
     t.up("ctrl_l")
     assert t.down("f9") == "f9"

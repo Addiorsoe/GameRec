@@ -186,7 +186,6 @@ def run_gui() -> None:
     stop = threading.Event()
     threading.Thread(target=press_keys, args=(stop,), daemon=True).start()
     # auto-answer dialogs
-    appmod._ask_text = lambda *a, **k: "gui e2e"
     messagebox.askyesno = lambda *a, **k: False
     messagebox.showinfo = lambda *a, **k: None
     errors: list[str] = []
@@ -204,10 +203,16 @@ def run_gui() -> None:
     ):
         a.e_name.set(name), a.e_type.set(vtype), a.e_addr.set(where)
         a.add_watch()
+    a.group_var.set("A")
+    a.notes_var.set("gui e2e")
     result = {}
 
-    def step_start():
-        a.start()
+    def step_hotkey_start():  # default start/stop hotkey F9 via the global hook
+        press_combo("f9")
+
+    def step_check_started():
+        if not (a.session and a.session.started and not a.session.stopped):
+            errors.append("F9 did not start recording")
 
     def step_mark():
         a.mark_var.set("walk north")
@@ -226,8 +231,8 @@ def run_gui() -> None:
                 kb.release(k)
         threading.Thread(target=go, daemon=True).start()
 
-    def step_hotkey_mark():  # default mark hotkey F9 via the global hook
-        press_combo("f9")
+    def step_hotkey_mark():  # default mark hotkey F10 via the global hook
+        press_combo("f10")
 
     def step_force_stop():  # fixed force-stop combo must stop + export without dialogs
         press_combo("ctrl", "alt", "end")
@@ -266,6 +271,9 @@ def run_gui() -> None:
 
     def step_check():
         result["zip"] = a.last_zip
+        result["name_ok"] = bool(a.last_zip and "_A-01_" in a.last_zip.name)
+        a.notes_var.set("note added afterwards")  # notes can be added after stopping
+        a.save_notes()
         result["stopped"] = bool(a.session and a.session.stopped)
         root.destroy()
 
@@ -283,7 +291,7 @@ def run_gui() -> None:
             root.after(delay, lambda: (fn(), chain(steps[1:])))
 
     chain([(1000, step_focus_target), (1500, step_check_lock), (300, lambda: screenshot("1_locked.png")),
-           (500, step_start), (1500, step_mark), (1500, step_hotkey_mark),
+           (500, step_hotkey_start), (1500, step_check_started), (500, step_mark), (1500, step_hotkey_mark),
            (1500, lambda: screenshot("2_recording.png")),
            (SECONDS * 1000, step_force_stop), (3000, lambda: screenshot("3_exported.png")), (200, step_check)])
     root.after(60_000, root.destroy)
@@ -298,9 +306,14 @@ def run_gui() -> None:
     man = json.loads(zipfile.ZipFile(result["zip"]).read("manifest.json"))
     if "強制停止" not in man.get("notes", ""):
         raise SystemExit(f"export was not made by the force-stop key: notes={man.get('notes')!r}")
+    if not result.get("name_ok") or man.get("group") != "A" or man.get("take") != 1:
+        raise SystemExit(f"group/take missing: {Path(result['zip']).name} group={man.get('group')} take={man.get('take')}")
+    if not man.get("notes", "").startswith("note added afterwards"):
+        raise SystemExit(f"notes added after stopping were not saved: {man.get('notes')!r}")
+    print(f"segment OK: {Path(result['zip']).name} notes={man['notes']!r}")
     if man["target"].get("window_title") != "E2E Target Game":
         raise SystemExit(f"locked target window not used: {man['target']}")
-    print("hotkeys OK (F8 lock target + F9 marker + Ctrl+Alt+End force stop)")
+    print("hotkeys OK (F8 lock target + F9 start + F10 marker + Ctrl+Alt+End force stop)")
 
 
 def _diagnose() -> None:
