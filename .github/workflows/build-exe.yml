@@ -50,6 +50,10 @@ jobs:
           path: e2e-artifacts/screens/
           if-no-files-found: ignore
 
+      - name: Print GUI screenshots to the log (base64 JPEG, for viewers without artifact access)
+        if: always()
+        run: python -c "import cv2,base64,glob;[print('SHOT', f.replace(chr(92),'/').split('/')[-1], base64.b64encode(cv2.imencode('.jpg', cv2.resize(cv2.imread(f), None, fx=0.75, fy=0.75), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()).decode()) for f in sorted(glob.glob('e2e-artifacts/screens/*.png'))]"
+
       - name: Build exe
         run: scripts\build_exe.bat
         shell: cmd
