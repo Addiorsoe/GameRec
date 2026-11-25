@@ -19,9 +19,16 @@
 1. 到 [Releases](https://github.com/Addiorsoe/gamerec/releases) 下載最新的 `GameRec.exe`
    （或到 [Actions](https://github.com/Addiorsoe/gamerec/actions) 點最新一次成功的建置，下載 `GameRec-exe`）
 2. **雙擊 `GameRec.exe`**，Windows 會詢問系統管理員權限，按「是」
-3. 第一次開啟若跳出「需要安裝 Npcap」，按「是」開啟下載頁，安裝時勾選
-   **Install Npcap in WinPcap API-compatible Mode**，裝好後回到程式按「重新檢查」
-   （Npcap 只有抓封包需要；沒裝也能監看記憶體和錄影）
+3. 程式啟動時會**自動檢查環境**，有缺少的項目會跳出「環境檢查」視窗，每一項旁邊都有一鍵修復按鈕：
+
+   | 項目 | 沒通過時 |
+   |---|---|
+   | Windows 10/11、64 位元 | 顯示原因（無法自動修復） |
+   | 系統管理員權限 | 「以管理員重新啟動」 |
+   | Npcap 封包驅動 | 「一鍵下載安裝」：從官方 npcap.com 下載並開啟安裝程式，安裝時勾選 **WinPcap API-compatible Mode** |
+   | 新版本 | 從本 repo 的 GitHub Releases 檢查，一鍵下載新版 exe |
+
+   之後可隨時按主畫面的「環境檢查 / 更新」再開啟。Npcap 只有抓封包需要，沒裝也能監看記憶體和錄影。
 
 不需要安裝 Python，也不需要打任何指令。
 

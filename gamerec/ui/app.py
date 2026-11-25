@@ -6,13 +6,13 @@ import logging
 import time
 import tkinter as tk
 import traceback
-import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .. import __version__
 from ..build import make_recorders
-from ..env_check import NPCAP_URL, default_output_dir, is_admin, is_windows, npcap_installed, open_folder
+from ..env_check import default_output_dir, is_admin, is_windows, npcap_installed, open_folder, run_checks
+from .env_dialog import EnvDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry
 from ..process import get_target, list_processes
@@ -83,10 +83,10 @@ class App(ttk.Frame):
         self.env_var = tk.StringVar()
         self.env_label = ttk.Label(opt, textvariable=self.env_var)
         self.env_label.grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        self.b_npcap = ttk.Button(opt, text="下載 Npcap", command=lambda: webbrowser.open(NPCAP_URL))
+        self.b_npcap = ttk.Button(opt, text="安裝 Npcap", command=self.open_env)
         self.b_npcap.grid(row=1, column=6, columnspan=2, sticky="w", pady=(4, 0))
         self.b_npcap.grid_remove()
-        ttk.Button(opt, text="重新檢查", command=self.check_environment).grid(row=1, column=8, sticky="w", pady=(4, 0))
+        ttk.Button(opt, text="環境檢查 / 更新", command=self.open_env).grid(row=1, column=8, sticky="w", pady=(4, 0))
 
         out = ttk.Frame(opt)
         out.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(4, 0))
@@ -113,13 +113,13 @@ class App(ttk.Frame):
         self.master.bind("<F9>", lambda _e: self.mark())
 
     # ---------------------------------------------------------- environment
-    def check_environment(self) -> None:
+    def check_environment(self, auto_open: bool = True) -> None:
+        """Refresh the status line; open the environment window if anything is missing."""
+        checks = run_checks()
         msgs = []
-        admin = is_admin()
-        has_npcap = npcap_installed()
-        if not admin:
+        if not is_admin():
             msgs.append("⚠ 未以系統管理員執行（讀記憶體可能失敗）")
-        if has_npcap:
+        if npcap_installed():
             msgs.append("✓ Npcap 已安裝，可以抓封包")
             self.b_npcap.grid_remove()
         else:
@@ -127,15 +127,16 @@ class App(ttk.Frame):
             self.v_net.set(False)
             self.b_npcap.grid()
         self.env_var.set("　".join(msgs))
-        if not has_npcap and not getattr(self, "_npcap_prompted", False):
-            self._npcap_prompted = True
-            if messagebox.askyesno(
-                "需要安裝 Npcap",
-                "抓封包需要免費的 Npcap 驅動程式，目前尚未安裝。\n\n"
-                "安裝時請勾選「Install Npcap in WinPcap API-compatible Mode」，\n"
-                "裝好後回到這裡按「重新檢查」即可。\n\n要現在開啟下載頁面嗎？",
-            ):
-                webbrowser.open(NPCAP_URL)
+        if auto_open and not all(c.ok for c in checks) and not getattr(self, "_env_shown", False):
+            self._env_shown = True
+            self.open_env()
+
+    def open_env(self) -> None:
+        dlg = getattr(self, "_env_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        self._env_dlg = EnvDialog(self.master, on_change=lambda: self.check_environment(auto_open=False))
 
     def pick_out(self) -> None:
         p = filedialog.askdirectory(initialdir=self.out_var.get())
