@@ -55,6 +55,16 @@ class ScreenRecorder(Recorder):
 
         cv2 = self._cv2
         self._sct = self._mss.mss()
+        try:
+            self._loop(np, cv2)
+        finally:
+            # GDI handles must be released on the thread that created them (Windows)
+            try:
+                self._sct.close()
+            finally:
+                self._sct = None
+
+    def _loop(self, np, cv2) -> None:
         period = 1.0 / self.fps
         next_t = time.perf_counter()
         while not self.stopping:
@@ -79,5 +89,3 @@ class ScreenRecorder(Recorder):
             self._writer.release()
         if getattr(self, "_fh", None):
             self._fh.close()
-        if getattr(self, "_sct", None):
-            self._sct.close()
