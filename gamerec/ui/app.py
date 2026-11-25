@@ -85,6 +85,7 @@ class App(ttk.Frame):
         bar.grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
         ttk.Button(bar, text="匯入 JSON", command=self.load_watch).pack(side="left")
         ttk.Button(bar, text="另存 JSON", command=self.save_watch).pack(side="left", padx=4)
+        ttk.Button(bar, text="找座標精靈…", command=self.open_finder).pack(side="left", padx=4)
         ttk.Label(bar, text="位址格式：0x1234ABCD ｜ game.exe+0x2233F0 ｜ game.exe+0x1F00A0,0x10,0x48").pack(side="left", padx=8)
         self.watch_hint = tk.StringVar()
         ttk.Label(mem, textvariable=self.watch_hint, foreground="#a00").grid(row=3, column=0, columnspan=6, sticky="w")
@@ -291,6 +292,21 @@ class App(ttk.Frame):
                 messagebox.showerror("無法匯入", str(e))
                 return
             self._redraw()
+
+    def open_finder(self) -> None:
+        dlg = getattr(self, "_finder_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        if not self.locked:
+            messagebox.showinfo("找座標精靈", f"請先切到遊戲視窗，按 {pretty(self.hk_config.bindings['lock_target'])} 鎖定目標。")
+            return
+        if self.session and self.session.started and not self.session.stopped:
+            messagebox.showinfo("找座標精靈", "錄製中不能使用，請先停止錄製。")
+            return
+        from .finder_dialog import FinderDialog
+
+        self._finder_dlg = FinderDialog(self.master, self)
 
     def save_watch(self) -> None:
         p = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
@@ -537,7 +553,7 @@ def _arm_smoke(root, app, smoke_file: str) -> None:
 
             for mod in ("cv2", "mss", "numpy", "psutil", "pymem", "pynput.keyboard", "scapy.all",
                         "gamerec.memory.scanner", "gamerec.net.capture", "gamerec.video.recorder",
-                        "gamerec.inputs.logger", "gamerec.env_check", "gamerec.ui.env_dialog",
+                        "gamerec.inputs.logger", "gamerec.env_check", "gamerec.ui.env_dialog", "gamerec.ui.finder_dialog",
                         "gamerec.hotkeys", "gamerec.ui.hotkey_dialog"):
                 importlib.import_module(mod)
             info["processes"] = len(app.proc_box["values"])

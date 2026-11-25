@@ -5,6 +5,7 @@ Usage:
   python scripts/e2e_windows.py exe PATH.exe   # same, through the packaged exe
   python scripts/e2e_windows.py gui            # drive the tkinter GUI programmatically
   python scripts/e2e_windows.py smoke PATH.exe # launch the packaged GUI and check it starts
+  python scripts/e2e_windows.py finder         # coordinate finder against a real second process
 """
 from __future__ import annotations
 
@@ -380,6 +381,56 @@ def run_smoke(exe: str) -> None:
     print("SMOKE OK")
 
 
+def run_finder() -> None:
+    """Unknown-value coordinate finder on a real process: ReadProcessMemory over its whole memory."""
+    sys.path.insert(0, str(ROOT))
+    from gamerec.memory.scanner import ProcessMemory, UnknownValueScanner
+
+    tmp = Path(tempfile.mkdtemp())
+    info_file, walk = tmp / "coord.json", tmp / "walk"
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tests" / "e2e" / "coord_target.py"), str(info_file), str(walk)])
+    try:
+        for _ in range(300):
+            if info_file.exists() and info_file.stat().st_size:
+                break
+            time.sleep(0.1)
+        info = json.loads(info_file.read_text())
+        sc = UnknownValueScanner(ProcessMemory(info["pid"]), "float")
+
+        def window(mode, secs, rebase=True):
+            sc.begin_window(rebase)
+            end = time.monotonic() + secs
+            while time.monotonic() < end:
+                time.sleep(0.25)
+                sc.sample()
+            return sc.end_window(mode)
+
+        t0 = time.monotonic()
+        n = sc.first_scan()
+        print(f"first scan: {n:,} candidates in {time.monotonic() - t0:.1f}s (target holds {info['noise_mb']} MB of float noise)")
+        for r in range(1, 5):
+            walk.touch()
+            moved = window("changed", 3, rebase=r > 1)
+            walk.unlink()
+            time.sleep(0.5)
+            still = window("unchanged", 2)
+            print(f"round {r}: walking -> {moved:,}, standing -> {still:,}")
+        found = {a for a, _ in sc.results()}
+        print("candidates:", [hex(a) for a in sorted(found)])
+        problems = []
+        if not {info["x"], info["y"]} <= found:
+            problems.append("player x/y not found")
+        if info["timer"] in found or info["z"] in found:
+            problems.append("timer or constant z wrongly kept")
+        if len(found) > 20:
+            problems.append(f"too many candidates left: {len(found)}")
+        if problems:
+            raise SystemExit("finder: " + "; ".join(problems))
+        print("FINDER OK")
+    finally:
+        proc.kill()
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "cli":
@@ -390,3 +441,5 @@ if __name__ == "__main__":
         run_gui()
     elif mode == "smoke":
         run_smoke(sys.argv[2])
+    elif mode == "finder":
+        run_finder()
