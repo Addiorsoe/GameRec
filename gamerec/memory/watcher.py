@@ -55,14 +55,6 @@ class MemoryReader:
     """Thin wrapper over pymem so it can be faked in tests."""
 
     def __init__(self, pid: int) -> None:
-        import sys
-
-        if sys.platform != "win32":  # test backend
-            from .procmem import ProcMem
-
-            self.pm, self.is_64, self._linux = ProcMem(pid), True, True
-            return
-        self._linux = False
         import pymem  # noqa: PLC0415 - Windows only
 
         self.pm = pymem.Pymem()
@@ -72,8 +64,6 @@ class MemoryReader:
         self.is_64 = bool(pymem.process.is_64_bit(self.pm.process_handle))
 
     def module_base(self, name: str) -> int:
-        if self._linux:
-            return self.pm.module_base(name)
         import pymem.process
 
         mod = pymem.process.module_from_name(self.pm.process_handle, name)
@@ -89,7 +79,7 @@ class MemoryReader:
         return int.from_bytes(self.read(addr, size), "little")
 
     def close(self) -> None:
-        self.pm.close() if self._linux else self.pm.close_process()
+        self.pm.close_process()
 
 
 def resolve(entry: WatchEntry, reader) -> int:

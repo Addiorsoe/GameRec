@@ -17,26 +17,16 @@ PREDICATES: dict[str, Predicate] = {
 
 class ValueScanner:
     def __init__(self, pid: int, vtype: str = "int32") -> None:
-        import sys
+        import pymem  # noqa: PLC0415
 
-        if sys.platform != "win32":  # test backend
-            from .procmem import ProcMem
-
-            self.pm = ProcMem(pid)
-        else:
-            import pymem  # noqa: PLC0415
-
-            self.pm = pymem.Pymem()
-            self.pm.open_process_from_id(pid)
+        self.pm = pymem.Pymem()
+        self.pm.open_process_from_id(pid)
         self.vtype = vtype
         self.size = size_of(vtype)
         self.results: dict[int, object] = {}
 
     def _regions(self):
         """Yield (base, size) of committed, writable, non-guard memory regions."""
-        if hasattr(self.pm, "regions"):
-            yield from self.pm.regions()
-            return
         import pymem.exception
         import pymem.memory
 
