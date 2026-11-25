@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -19,7 +20,7 @@ from .env_dialog import EnvDialog
 from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry, load_watchlist
-from ..process import TargetInfo, get_target, list_processes, target_from_foreground
+from ..process import TargetInfo, find_target_by_name, get_target, list_processes, target_from_foreground
 from ..session import Session, next_take
 
 TYPES = ["int32", "uint32", "int16", "int64", "float", "double", "uint8", "bytes:16"]
@@ -52,6 +53,7 @@ class App(ttk.Frame):
         self.refresh_processes()
         self._start_hotkeys()
         self.after(300, self.check_environment)
+        self.after(1000, self._auto_lock)
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -198,6 +200,28 @@ class App(ttk.Frame):
         except Exception as e:  # noqa: BLE001
             self.status.set(f"無法列出程式：{e}")
 
+    def _last_target_path(self) -> Path:
+        return default_output_dir().parent / "last_target.json"
+
+    def _auto_lock(self) -> None:
+        """Lock the game locked last time as soon as its window exists (checked every 3 s until locked)."""
+        if self.locked:
+            return
+        try:
+            name = json.loads(self._last_target_path().read_text(encoding="utf-8")).get("name", "")
+        except (OSError, ValueError):
+            return  # never locked anything: keep the manual hint
+        recording = self.session and self.session.started and not self.session.stopped
+        if name and not recording and sys.platform == "win32":
+            try:
+                t = find_target_by_name(name)
+            except Exception:  # noqa: BLE001 - not running (yet)
+                t = None
+            if t and t.hwnd:
+                self._set_locked(t, auto=True)
+                return
+        self.after(3000, self._auto_lock)
+
     def lock_foreground(self) -> None:
         """Lock the target to the window that currently has focus (hotkey)."""
         if self.session and self.session.started and not self.session.stopped:
@@ -212,10 +236,20 @@ class App(ttk.Frame):
         if t.pid == os.getpid():
             self.status.set(f"請先點一下遊戲視窗，再按 {pretty(self.hk_config.bindings['lock_target'])}")
             return
+        self._set_locked(t)
+
+    def _set_locked(self, t: TargetInfo, auto: bool = False) -> None:
         self.locked = t
         self.proc_var.set(f"{t.name}  [{t.pid}]")
-        self.lock_var.set(f"🔒 已鎖定：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
+        how = "（自動鎖定上次的遊戲）" if auto else ""
+        self.lock_var.set(f"🔒 已鎖定{how}：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
         self.status.set(f"已鎖定 {t.name}")
+        try:
+            p = self._last_target_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"name": t.name}), encoding="utf-8")
+        except OSError:
+            pass
         try:
             self.master.bell()
         except tk.TclError:

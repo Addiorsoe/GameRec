@@ -21,6 +21,7 @@ from tkinter import messagebox, ttk
 from ..env_check import default_output_dir
 from ..memory.scanner import Cancelled, ProcessMemory, UnknownValueScanner
 from ..memory.watcher import WatchEntry
+from ..video.motion import MotionDetector, window_grabber
 
 log = logging.getLogger("gamerec")
 TABLE_AT = 200   # live value table when this few candidates remain
@@ -37,9 +38,12 @@ def _beep() -> None:
 class FinderDialog(tk.Toplevel):
     TIME_SCALE = 1.0  # tests shorten the prompts
     PREP, STILL, MOVE, GRACE, SAMPLE = 5.0, 3.0, 6.0, 2.0, 0.25  # GRACE: time to react and stop
+    # auto mode: minimum lengths of usable still / walk periods, detector lag to discard, time limit
+    AUTO_STILL, AUTO_WALK, AUTO_LAG, AUTO_MAX = 2.0, 1.5, 0.7, 180.0
 
-    def __init__(self, master, app, mem_factory=ProcessMemory) -> None:
+    def __init__(self, master, app, mem_factory=ProcessMemory, detector_factory=None) -> None:
         super().__init__(master)
+        self.detector_factory = detector_factory or (lambda: MotionDetector(window_grabber(self.target.hwnd)))
         self.app = app
         self.target = app.locked
         self.mem_factory = mem_factory
@@ -78,7 +82,8 @@ class FinderDialog(tk.Toplevel):
         self.rounds = tk.IntVar(value=4)
         ttk.Spinbox(f, from_=1, to=8, textvariable=self.rounds, width=4).grid(row=1, column=3, sticky="w")
 
-        self.prompt = tk.StringVar(value="按「開始」後切到遊戲，照著這裡的提示做（每換一步會響一聲）。")
+        self.prompt = tk.StringVar(value="建議按「自動找」，然後切到遊戲照平常玩一兩分鐘（走一走、偶爾停下來）。\n"
+                                         "鏡頭不會跟著角色移動的遊戲，請改用「照提示找」。")
         ttk.Label(f, textvariable=self.prompt, font=("", 13, "bold"), wraplength=460, foreground="#05a").grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(8, 2))
         self.info = tk.StringVar(value="")
@@ -88,7 +93,9 @@ class FinderDialog(tk.Toplevel):
 
         bar = ttk.Frame(f)
         bar.grid(row=4, column=0, columnspan=4, sticky="w", pady=6)
-        self.b_start = ttk.Button(bar, text="開始", command=self.start)
+        self.b_auto = ttk.Button(bar, text="自動找（正常玩就好）", command=lambda: self.start(auto=True))
+        self.b_auto.pack(side="left", padx=2)
+        self.b_start = ttk.Button(bar, text="照提示找", command=self.start)
         self.b_more = ttk.Button(bar, text="再一輪", command=lambda: self.start(more=True), state="disabled")
         self.b_stop = ttk.Button(bar, text="停止", command=self.stop, state="disabled")
         for b in (self.b_start, self.b_more, self.b_stop):
@@ -119,7 +126,7 @@ class FinderDialog(tk.Toplevel):
         f.rowconfigure(5, weight=1)
 
     # ------------------------------------------------------------ worker
-    def start(self, more: bool = False) -> None:
+    def start(self, more: bool = False, auto: bool = False) -> None:
         if self._worker and self._worker.is_alive():
             return
         if not more:
@@ -128,11 +135,13 @@ class FinderDialog(tk.Toplevel):
             except Exception as e:  # noqa: BLE001
                 messagebox.showerror("無法讀取記憶體", f"{e}\n\n請確認以系統管理員執行，且遊戲仍在執行。", parent=self)
                 return
+        self._auto = auto
         self._stop.clear()
         self._set_busy(True)
         self.tree.delete(*self.tree.get_children())
         self._rows = []
-        self._worker = threading.Thread(target=self._run, args=(more,), daemon=True)
+        self._worker = threading.Thread(target=self._run_auto if auto else self._run,
+                                        args=() if auto else (more,), daemon=True)
         self._worker.start()
 
     def stop(self) -> None:
@@ -195,6 +204,83 @@ class FinderDialog(tk.Toplevel):
             log.exception("finder failed")
             self._q.put(("error", str(e)))
 
+    def _run_auto(self) -> None:
+        """Auto mode: the player just plays; the screen motion detector says when they walk or
+        stand, and memory is filtered over those periods."""
+        sc = self.scanner
+        det = self.detector_factory()
+        det.start()
+        self.detector = det
+        try:
+            self.expect = "play"
+            self._phase("切到遊戲，照平常玩：走一走、偶爾停下來", 0, "等你開始走動…")
+            n = sc.walk_scan(progress=lambda d, t: self._q.put(("progress", d, t)), cancelled=self._stop.is_set,
+                             walking_since=det.walking_since,
+                             paused=lambda p: self._q.put(("paused", p)))
+            self._q.put(("count", n))
+            walks = stills = 0
+            end = time.monotonic() + self.AUTO_MAX * self.TIME_SCALE
+            while n and not self._stop.is_set() and time.monotonic() < end:
+                if det.state == "still" and det.still_for() >= 0.8 * self.TIME_SCALE:
+                    if self._auto_still(det):
+                        stills += 1
+                        n = sc.count
+                elif det.state == "walk":
+                    if self._auto_walk(det):
+                        walks += 1
+                        n = sc.count
+                else:
+                    time.sleep(0.05)
+                    continue
+                self._q.put(("auto", walks, stills, n))
+                if stills >= 3 and walks >= 2 and n <= 10:
+                    break
+            self._q.put(("stopped",) if self._stop.is_set() else ("done",))
+        except Cancelled:
+            self._q.put(("stopped",))
+        except Exception as e:  # noqa: BLE001
+            log.exception("finder auto mode failed")
+            self._q.put(("error", str(e)))
+        finally:
+            det.stop()
+            if det.error:
+                log.warning("motion detector: %s", det.error)
+
+    def _auto_still(self, det) -> bool:
+        """Sample while the player stands. Samples taken in the last AUTO_LAG s before the
+        detector noticed movement are dropped: the player may already have been moving."""
+        sc = self.scanner
+        sc.begin_window()
+        t0 = time.monotonic()
+        pending: list[tuple[float, list]] = []
+        lag = self.AUTO_LAG * self.TIME_SCALE
+        while det.state == "still" and not self._stop.is_set():
+            self._stop.wait(self.SAMPLE * self.TIME_SCALE)
+            now = time.monotonic()
+            pending.append((now, sc.sample(commit=False)))
+            while pending and pending[0][0] < now - lag:
+                sc.commit(pending.pop(0)[1])
+        cutoff = det.since - lag if det.state != "still" else time.monotonic()
+        for t, masks in pending:
+            if t < cutoff:
+                sc.commit(masks)
+        if cutoff - t0 < self.AUTO_STILL * self.TIME_SCALE or self._stop.is_set():
+            return False  # too short to trust: discard this window
+        sc.end_window("unchanged", sample_now=False)
+        return True
+
+    def _auto_walk(self, det) -> bool:
+        sc = self.scanner
+        sc.begin_window()
+        t0 = time.monotonic()
+        while det.state == "walk" and not self._stop.is_set():
+            self._stop.wait(self.SAMPLE * self.TIME_SCALE)
+            sc.sample()
+        if time.monotonic() - t0 < self.AUTO_WALK * self.TIME_SCALE or self._stop.is_set():
+            return False
+        sc.end_window("changed")
+        return True
+
     # ------------------------------------------------------------ UI side
     def _poll(self) -> None:
         try:
@@ -209,6 +295,14 @@ class FinderDialog(tk.Toplevel):
                 elif kind == "progress":
                     d, t = msg[1], msg[2]
                     self.info.set(f"掃描中 {d * 100 // max(t, 1)}%（{d / 2**30:.1f} / {t / 2**30:.1f} GB），請繼續走動")
+                elif kind == "paused":
+                    if msg[1]:
+                        self.info.set("暫停：等你繼續走動（掃描只在走動時進行）")
+                elif kind == "auto":
+                    _, walks, stills, n = msg
+                    self.prompt.set("繼續照平常玩：走一走、偶爾停下來")
+                    self.info.set(f"已用上 走動 {walks} 段、站著 {stills} 段（各需要 2～3 段以上）")
+                    self.count_var.set(f"剩下 {n:,} 個候選")
                 elif kind == "count":
                     self.count_var.set(f"剩下 {msg[1]:,} 個候選")
                 elif kind in ("done", "stopped", "error"):
@@ -244,11 +338,14 @@ class FinderDialog(tk.Toplevel):
             self.prompt.set(f"找到 {n} 個候選位址")
             self.info.set("移動角色時看哪幾個數值跟著變；選取後加入監看清單。")
             self._show_table()
+            if getattr(self, "_auto", False) and kind == "done" and n <= ADD_ALL_AT:
+                self.add_all()  # auto mode: nothing left for the user to pick; still only candidates
         self._save_report(kind)
 
     def _set_busy(self, busy: bool) -> None:
         idle = "disabled" if busy else "normal"
         self.b_start["state"] = idle
+        self.b_auto["state"] = idle
         self.b_stop["state"] = "normal" if busy else "disabled"
         has = bool(self.scanner and self.scanner.history)
         self.b_more["state"] = "normal" if (not busy and has and self.scanner.count) else "disabled"

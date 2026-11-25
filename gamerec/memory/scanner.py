@@ -123,8 +123,14 @@ class UnknownValueScanner:
 
     # ---------------------------------------------------------- first pass
     def walk_scan(self, progress: Callable[[int, int], None] | None = None,
-                  cancelled: Callable[[], bool] | None = None, gap: float = GAP) -> int:
-        """Keep values that change while the player keeps walking (two reads `gap` s apart)."""
+                  cancelled: Callable[[], bool] | None = None, gap: float = GAP,
+                  walking_since: Callable[[float], bool] | None = None,
+                  paused: Callable[[bool], None] | None = None) -> int:
+        """Keep values that change while the player keeps walking (two reads `gap` s apart).
+
+        walking_since(t): True if the player has been walking continuously since monotonic time t.
+        When given (auto mode), a batch is only kept if the player walked through both of its
+        reads; otherwise it waits for walking to resume and reads that batch again."""
         t0 = time.monotonic()
         regions = [(b, s) for b, s in self.mem.regions()]
         pieces = [(b + off, min(CHUNK, s - off)) for b, s in regions for off in range(0, s, CHUNK)]
@@ -138,16 +144,28 @@ class UnknownValueScanner:
                 batch.append(pieces[i])
                 size += pieces[i][1]
                 i += 1
-            first = []
-            t_first = time.monotonic()
-            for addr, n in batch:
-                if cancelled and cancelled():
-                    raise Cancelled
-                buf = self.mem.read(addr, n)
-                first.append(self._view(buf) if buf else None)
-            wait = gap - (time.monotonic() - t_first)
-            if wait > 0:
-                time.sleep(wait)
+            while True:
+                if walking_since:
+                    while not walking_since(time.monotonic()):
+                        if paused:
+                            paused(True)
+                        if cancelled and cancelled():
+                            raise Cancelled
+                        time.sleep(0.1)
+                    if paused:
+                        paused(False)
+                first = []
+                t_first = time.monotonic()
+                for addr, n in batch:
+                    if cancelled and cancelled():
+                        raise Cancelled
+                    buf = self.mem.read(addr, n)
+                    first.append(self._view(buf) if buf else None)
+                wait = gap - (time.monotonic() - t_first)
+                if wait > 0:
+                    time.sleep(wait)
+                if not walking_since or walking_since(t_first):
+                    break  # the player walked through the first reads: compare now
             for (addr, n), old in zip(batch, first):
                 done += n
                 if old is None:
@@ -181,19 +199,32 @@ class UnknownValueScanner:
         self._any = [np.zeros(len(c.idx), bool) for c in self.chunks]
         self._t_window = time.monotonic()
 
-    def sample(self) -> None:
+    def sample(self, commit: bool = True) -> list[np.ndarray]:
+        """Compare now with the window's reference. Returns the per-chunk "changed" masks;
+        commit=False lets the caller decide later (auto mode drops samples taken around the
+        moment the player started moving, which the screen detector only notices ~0.4 s late)."""
+        masks = []
         for c, any_ in zip(self.chunks, self._any):
             new = self._read_at(c)
             if new is None:
-                any_[:] = True  # unreadable now: treat as changed (dropped by "unchanged")
-                continue
-            with np.errstate(invalid="ignore"):
-                any_ |= new != c.vals
+                m = np.ones(len(c.idx), bool)  # unreadable now: treat as changed (dropped by "unchanged")
+            else:
+                with np.errstate(invalid="ignore"):
+                    m = new != c.vals
+            masks.append(m)
+            if commit:
+                any_ |= m
+        return masks
 
-    def end_window(self, mode: str) -> int:
+    def commit(self, masks: list[np.ndarray]) -> None:
+        for any_, m in zip(self._any, masks):
+            any_ |= m
+
+    def end_window(self, mode: str, sample_now: bool = True) -> int:
         """mode "changed": changed at ANY sample (walking a loop changes every axis at some point,
         even if the player ends near the start). "unchanged": never changed at any sample."""
-        self.sample()
+        if sample_now:
+            self.sample()
         out = []
         for c, any_ in zip(self.chunks, self._any):
             new = self._read_at(c)
