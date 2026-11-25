@@ -1,6 +1,5 @@
 """Drive the 找座標精靈 window end to end with fake memory (needs a display: xvfb-run on Linux)."""
 import json
-import math
 import os
 import sys
 from types import SimpleNamespace
@@ -17,21 +16,7 @@ from test_finder import FakeMem  # noqa: E402
 
 
 class LiveMem(FakeMem):
-    """Memory of a 'game': while the player is told to walk, x/y move along a circle."""
-
-    def __init__(self):
-        super().__init__()
-        self.walking = False
-        self.t = 0.0
-
-    def read(self, addr, size):
-        f = self.f32(0x20000000)
-        f[self.timer] += 0.016                      # animation timer: always changes
-        if self.walking:
-            self.t += 0.3
-            f[self.px] = 120.5 + 10 * math.cos(self.t)
-            f[self.py] = -33.25 + 10 * math.sin(self.t)
-        return super().read(addr, size)
+    pass
 
 
 def test_wizard_finds_and_adds_candidates(tmp_path):
@@ -44,7 +29,7 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     result = {}
 
     def follow_prompts():                            # the "player": walks when told to
-        mem.walking = "繞著走" in dlg.prompt.get()
+        mem.walking = dlg.expect == "walk"     # follows the worker's current instruction
         if dlg.finished and "found" not in result:
             result["found"] = {a for a, _ in dlg.scanner.results()}
             result["prompt"] = dlg.prompt.get()
@@ -67,4 +52,6 @@ def test_wizard_finds_and_adds_candidates(tmp_path):
     assert names[:2] == ["cand_001", "cand_002"] and all(w.type == "float" for w in app.watch)
     report = json.loads(next(tmp_path.glob("finder_*_game.exe.json")).read_text(encoding="utf-8"))
     assert report["event"] == "added" and "NOT confirmed" in report["note"]
-    assert report["steps"][0]["mode"] == "first" and len(report["added_to_watchlist"]) == len(app.watch)
+    assert report["steps"][0]["mode"].startswith("changed while walking")
+    assert len(report["added_to_watchlist"]) == len(app.watch)
+    assert dlg.log_path.name == "finder.log"

@@ -18,7 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from ..memory.scanner import ProcessMemory, UnknownValueScanner
+from ..env_check import default_output_dir
+from ..memory.scanner import Cancelled, ProcessMemory, UnknownValueScanner
 from ..memory.watcher import WatchEntry
 
 log = logging.getLogger("gamerec")
@@ -35,7 +36,7 @@ def _beep() -> None:
 
 class FinderDialog(tk.Toplevel):
     TIME_SCALE = 1.0  # tests shorten the prompts
-    PREP, STILL, MOVE, GRACE, SAMPLE = 5.0, 3.0, 6.0, 1.5, 0.25
+    PREP, STILL, MOVE, GRACE, SAMPLE = 5.0, 3.0, 6.0, 2.0, 0.25  # GRACE: time to react and stop
 
     def __init__(self, master, app, mem_factory=ProcessMemory) -> None:
         super().__init__(master)
@@ -50,6 +51,16 @@ class FinderDialog(tk.Toplevel):
         self._worker: threading.Thread | None = None
         self._rows: list[int] = []
         self.finished = ""  # last outcome: done | stopped | error
+        self.expect = "still"
+        # the finder runs outside any recording, so it gets its own log file
+        self.log_path = default_output_dir().parent / "finder.log"
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_handler = logging.FileHandler(self.log_path, encoding="utf-8")
+        self._log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        lg = logging.getLogger("gamerec")
+        lg.addHandler(self._log_handler)
+        lg.setLevel(min(lg.level or logging.INFO, logging.INFO))
+        log.info("finder opened: target %s [%s]", self.target.name, self.target.pid)
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(100, self._poll)
@@ -113,8 +124,6 @@ class FinderDialog(tk.Toplevel):
             return
         if not more:
             try:
-                if self.scanner:
-                    self.scanner.close_temp()
                 self.scanner = UnknownValueScanner(self.mem_factory(self.target.pid), self.vtype.get())
             except Exception as e:  # noqa: BLE001
                 messagebox.showerror("無法讀取記憶體", f"{e}\n\n請確認以系統管理員執行，且遊戲仍在執行。", parent=self)
@@ -134,11 +143,13 @@ class FinderDialog(tk.Toplevel):
         return not self._stop.wait(secs * self.TIME_SCALE)
 
     def _phase(self, text: str, secs: float, info: str = "") -> None:
+        # what the player should be doing right now ("walk" / "still"), set by the worker itself
+        self.expect = "walk" if ("走動" in text and "準備" not in text) or "繞著走" in text else "still"
         self._q.put(("phase", text, info, secs))
 
-    def _window(self, mode: str, secs: float, rebase: bool = True) -> bool:
+    def _window(self, mode: str, secs: float) -> bool:
         sc = self.scanner
-        sc.begin_window(rebase)
+        sc.begin_window()
         end = time.monotonic() + secs * self.TIME_SCALE
         while time.monotonic() < end:
             if not self._wait(self.SAMPLE):
@@ -150,27 +161,36 @@ class FinderDialog(tk.Toplevel):
 
     def _run(self, more: bool) -> None:
         sc = self.scanner
+        stopped = lambda: self._q.put(("stopped",))  # noqa: E731
         try:
             if not more:
-                self._phase("切到遊戲，讓角色站著不動", self.PREP, "準備中…")
+                self._phase("切到遊戲，準備開始走動", self.PREP, "5 秒後開始")
                 if not self._wait(self.PREP):
-                    return self._q.put(("stopped",))
-                self._phase("站著不動（正在掃描記憶體，可能要十幾秒）", 0)
-                n = sc.first_scan()
+                    return stopped()
+                self._phase("持續走動（按住滑鼠或一直點地面，繞著走），直到這裡叫你停", 0, "掃描記憶體中…")
+                n = sc.walk_scan(progress=lambda d, t: self._q.put(("progress", d, t)), cancelled=self._stop.is_set)
                 self._q.put(("count", n))
+                if not n:
+                    return self._q.put(("done",))
+                self._phase("停下來，站著不動", self.GRACE + self.STILL)
+                if not self._wait(self.GRACE):
+                    return stopped()
+                if not self._window("unchanged", self.STILL):
+                    return stopped() if self._stop.is_set() else self._q.put(("done",))
             for r in range(1, self.rounds.get() + 1):
                 self._phase(f"第 {r} 輪：繞著走一小圈（上下左右都走到），然後停下", self.MOVE)
-                # first window compares against the snapshot itself (taken while standing still)
-                if not self._window("changed", self.MOVE, rebase=more or r > 1):
-                    return self._q.put(("done",))
+                if not self._window("changed", self.MOVE):
+                    return stopped() if self._stop.is_set() else self._q.put(("done",))
                 self._phase(f"第 {r} 輪：停下來，站著不動", self.GRACE + self.STILL)
                 if not self._wait(self.GRACE):  # let the character come to a stop
-                    return self._q.put(("stopped",))
+                    return stopped()
                 if not self._window("unchanged", self.STILL):
-                    return self._q.put(("done",))
+                    return stopped() if self._stop.is_set() else self._q.put(("done",))
                 if sc.count <= 3:
                     break
             self._q.put(("done",))
+        except Cancelled:
+            stopped()
         except Exception as e:  # noqa: BLE001
             log.exception("finder failed")
             self._q.put(("error", str(e)))
@@ -186,6 +206,9 @@ class FinderDialog(tk.Toplevel):
                     self.prompt.set(text)
                     self.info.set(info or (f"{secs * self.TIME_SCALE:.0f} 秒" if secs else ""))
                     _beep()
+                elif kind == "progress":
+                    d, t = msg[1], msg[2]
+                    self.info.set(f"掃描中 {d * 100 // max(t, 1)}%（{d / 2**30:.1f} / {t / 2**30:.1f} GB），請繼續走動")
                 elif kind == "count":
                     self.count_var.set(f"剩下 {msg[1]:,} 個候選")
                 elif kind in ("done", "stopped", "error"):
@@ -207,7 +230,10 @@ class FinderDialog(tk.Toplevel):
         self.count_var.set(f"剩下 {n:,} 個候選")
         if kind == "error":
             self.prompt.set("發生錯誤")
-            self.info.set(err)
+            self.info.set(f"{err}\n詳細記錄：{self.log_path}")
+        elif kind == "stopped":
+            self.prompt.set("已停止")
+            self.info.set("可以按「開始」重新來過。")
         elif n == 0:
             self.prompt.set("沒有找到候選")
             self.info.set("可能型別不對（換 double 或 int32 再試），或移動時角色沒有真的走動。")
@@ -297,7 +323,7 @@ class FinderDialog(tk.Toplevel):
                 "format": "gamerec-finder", "event": event,
                 "note": "candidate addresses from changed/unchanged filtering; NOT confirmed as coordinates",
                 "target": {"pid": self.target.pid, "name": self.target.name},
-                "type": sc.vtype, "steps": sc.history,
+                "type": sc.vtype, "steps": sc.history, "scan": sc.scan_stats,
                 "candidates": [{"address": hex(a), "value": v} for a, v in sc.results(limit=TABLE_AT)],
                 "candidates_total": sc.count,
                 "added_to_watchlist": added or [],
@@ -309,6 +335,6 @@ class FinderDialog(tk.Toplevel):
 
     def close(self) -> None:
         self._stop.set()
-        if self.scanner:
-            self.scanner.close_temp()
+        logging.getLogger("gamerec").removeHandler(self._log_handler)
+        self._log_handler.close()
         self.destroy()

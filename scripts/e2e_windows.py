@@ -398,20 +398,26 @@ def run_finder() -> None:
         info = json.loads(info_file.read_text())
         sc = UnknownValueScanner(ProcessMemory(info["pid"]), "float")
 
-        def window(mode, secs, rebase=True):
-            sc.begin_window(rebase)
+        def window(mode, secs):
+            sc.begin_window()
             end = time.monotonic() + secs
             while time.monotonic() < end:
                 time.sleep(0.25)
                 sc.sample()
             return sc.end_window(mode)
 
-        t0 = time.monotonic()
-        n = sc.first_scan()
-        print(f"first scan: {n:,} candidates in {time.monotonic() - t0:.1f}s (target holds {info['noise_mb']} MB of float noise)")
-        for r in range(1, 5):
+        walk.touch()
+        time.sleep(0.5)
+        progress = []
+        n = sc.walk_scan(progress=lambda d, t: progress.append(d * 100 // t))
+        walk.unlink()
+        print(f"first pass (walking): {n:,} candidates, {sc.scan_stats}, progress {progress[:3]}..{progress[-1:]}%"
+              f" (target holds {info['noise_mb']} MB of float noise)")
+        time.sleep(0.5)
+        print("standing:", window("unchanged", 2))
+        for r in range(1, 4):
             walk.touch()
-            moved = window("changed", 3, rebase=r > 1)
+            moved = window("changed", 3)
             walk.unlink()
             time.sleep(0.5)
             still = window("unchanged", 2)
@@ -423,6 +429,8 @@ def run_finder() -> None:
             problems.append("player x/y not found")
         if info["timer"] in found or info["z"] in found:
             problems.append("timer or constant z wrongly kept")
+        if not progress or progress[-1] != 100:
+            problems.append(f"progress did not reach 100%: {progress[-3:]}")
         if len(found) > 20:
             problems.append(f"too many candidates left: {len(found)}")
         if problems:

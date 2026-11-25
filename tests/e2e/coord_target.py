@@ -1,4 +1,5 @@
-"""Fake 'game' for the coordinate finder e2e: ~200 MB of plausible float noise, a player whose
+"""Fake 'game' for the coordinate finder e2e: ~1.5 GB of plausible float noise (part of it animated
+every frame, like particles/transforms in a real engine), a player whose
 x/y walk a circle while the control file exists, an animation timer that always changes.
 
 argv[1]: JSON info file to write; argv[2]: control file path ("walk" while it exists).
@@ -12,7 +13,12 @@ import time
 
 import numpy as np
 
-noise = np.random.default_rng(0).uniform(-5000, 5000, 50_000_000).astype(np.float32)  # 200 MB
+N = 384 * 2**20  # floats -> 1.5 GB, close to a real game's heap
+noise = np.empty(N, np.float32)
+rng = np.random.default_rng(0)
+for i in range(0, N, 2**24):  # fill in pieces (avoids a 3 GB float64 temporary)
+    noise[i:i + 2**24] = rng.uniform(-5000, 5000, min(2**24, N - i))
+animated = noise[: 2**20]     # 1M floats that change every frame
 
 
 class Player(ctypes.Structure):
@@ -28,6 +34,7 @@ with open(sys.argv[1], "w") as f:
 t = 0.0
 while True:
     p.timer += 0.016
+    animated += 0.001
     if os.path.exists(sys.argv[2]):
         t += 0.05
         p.x = 812.5 + 40 * math.cos(t)
