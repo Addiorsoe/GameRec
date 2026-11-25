@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import threading
 import time
 import tkinter as tk
 import traceback
@@ -131,6 +132,9 @@ class App(ttk.Frame):
     def check_environment(self, auto_open: bool = True) -> None:
         """Refresh the status line; open the environment window if anything is missing."""
         checks = run_checks()
+        if not getattr(self, "_hw_started", False):  # PC specs: scanned once, alongside the first check
+            self._hw_started = True
+            threading.Thread(target=_scan_hardware_once, daemon=True).start()
         msgs = []
         if not is_admin():
             msgs.append("⚠ 未以系統管理員執行（讀記憶體可能失敗）")
@@ -402,6 +406,15 @@ class App(ttk.Frame):
             open_folder(zpath.parent)
 
 
+def _scan_hardware_once() -> None:
+    try:
+        from ..sysinfo import load_or_scan
+
+        load_or_scan()
+    except Exception:  # noqa: BLE001 - specs are informational, never block the app
+        logging.getLogger("gamerec").exception("hardware scan failed")
+
+
 def _ask_text(master, title: str, prompt: str) -> str | None:
     from tkinter import simpledialog
 
@@ -484,6 +497,8 @@ def _arm_smoke(root, app, smoke_file: str) -> None:
                 importlib.import_module(mod)
             info["processes"] = len(app.proc_box["values"])
             info["env"] = {c.key: c.ok for c in run_checks()}
+            from ..sysinfo import load_or_scan
+            info["sysinfo"] = load_or_scan()
             info["env_fixes"] = [c.fix_label for c in run_checks() if c.fix_label]  # one-click installer bundled
             info["hotkeys"] = app.hk_config.bindings
         except Exception as e:  # noqa: BLE001

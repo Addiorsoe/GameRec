@@ -16,6 +16,7 @@ from ..env_check import (
     relaunch_as_admin,
     run_checks,
 )
+from ..sysinfo import info_path, load_or_scan, summary_lines
 
 
 class EnvDialog(tk.Toplevel):
@@ -46,6 +47,7 @@ class EnvDialog(tk.Toplevel):
             if c.fix_label:
                 ttk.Button(self.body, text=c.fix_label, command=lambda k=c.key: self.fix(k)).grid(row=i, column=2, sticky="e")
         r = len(self.checks) + 1
+        r = self._hardware(r)
         ttk.Separator(self.body).grid(row=r, column=0, columnspan=3, sticky="ew", pady=8)
         self.upd_label = ttk.Label(self.body, text="🔄 檢查新版本中…")
         self.upd_label.grid(row=r + 1, column=0, columnspan=2, sticky="w")
@@ -62,6 +64,25 @@ class EnvDialog(tk.Toplevel):
         bar.grid(row=r + 4, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(bar, text="重新檢查", command=self.recheck).pack(side="left", padx=4)
         ttk.Button(bar, text="關閉", command=self.destroy).pack(side="left")
+
+    def _hardware(self, r: int) -> int:
+        """PC specs: scanned once and saved locally (system_info.json); "重新掃描" refreshes it."""
+        ttk.Separator(self.body).grid(row=r, column=0, columnspan=3, sticky="ew", pady=8)
+        ttk.Label(self.body, text="電腦規格（只存在本機）", font=("", 10, "bold")).grid(row=r + 1, column=0, columnspan=2, sticky="w")
+        ttk.Button(self.body, text="重新掃描", command=self.rescan).grid(row=r + 1, column=2, sticky="e")
+        try:
+            rows = summary_lines(load_or_scan())
+        except Exception as e:  # noqa: BLE001 - never block the environment window
+            rows = [("規格", f"掃描失敗：{e}")]
+        for i, (label, text) in enumerate(rows, start=r + 2):
+            ttk.Label(self.body, text=f"　{label}", width=18).grid(row=i, column=0, sticky="w")
+            ttk.Label(self.body, text=text, wraplength=330).grid(row=i, column=1, columnspan=2, sticky="w", padx=6)
+        return r + 2 + len(rows)
+
+    def rescan(self) -> None:
+        load_or_scan(force=True)
+        self.refresh()
+        self.status.set(f"已重新掃描，存在：{info_path()}")
 
     def recheck(self) -> None:
         self.refresh()

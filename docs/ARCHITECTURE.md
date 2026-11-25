@@ -52,6 +52,7 @@
 | `gamerec/net/capture.py` | scapy + Npcap | 抓網卡封包，依目標程式目前的本機埠動態過濾，寫 pcap + JSONL 索引 |
 | `gamerec/video/recorder.py` | mss, opencv-python | 依視窗位置截圖錄成 mp4，每幀寫時間戳 |
 | `gamerec/inputs/logger.py` | pynput | 記錄鍵盤/滑鼠事件（巡路分析需要知道玩家按了什麼） |
+| `gamerec/sysinfo.py` | psutil, winreg | 電腦規格掃描（只掃一次，存本機 `system_info.json`，供 AutoPath 判斷虛擬機可行性） |
 | `gamerec/session.py` | — | 建立 session 資料夾、管理所有記錄器、標記 |
 | `gamerec/export.py` | zipfile | 產生 manifest、打包 zip |
 | `gamerec/ui/app.py` | tkinter | 圖形介面 |

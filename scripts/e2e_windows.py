@@ -352,6 +352,9 @@ def run_smoke(exe: str) -> None:
     print(json.dumps(res, indent=1, ensure_ascii=False))
     if not res.get("ok"):
         raise SystemExit(1)
+    hw = res.get("sysinfo") or {}
+    if not ({"cpu", "ram", "gpus", "disks", "virtualization"} <= set(hw) and hw["ram"]["total_gb"] > 0):
+        raise SystemExit("hardware scan missing from the packaged exe")
     print("SMOKE OK")
 
 
