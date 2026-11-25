@@ -245,11 +245,14 @@ def run_gui() -> None:
     except ValueError:
         pass
 
-    root.after(1000, step_start)
-    root.after(4000, step_mark)
-    root.after(5500, step_hotkey_mark)
-    root.after(1000 + SECONDS * 1000, step_force_stop)
-    root.after(4000 + SECONDS * 1000, step_check)
+    # chain the steps so each waits for the previous one (the GUI can be slow to start)
+    def chain(steps):
+        if steps:
+            delay, fn = steps[0]
+            root.after(delay, lambda: (fn(), chain(steps[1:])))
+
+    chain([(1000, step_start), (1500, step_mark), (1500, step_hotkey_mark),
+           (SECONDS * 1000, step_force_stop), (3000, step_check)])
     root.after(60_000, root.destroy)
     root.mainloop()
     stop.set()
