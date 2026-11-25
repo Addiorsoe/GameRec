@@ -212,3 +212,50 @@ def test_manifest_lists_missing_streams(tmp_path):
     man = json.loads(zipfile.ZipFile(export_session(s)).read("manifest.json"))
     st = {x["kind"]: x["status"] for x in man["streams"]}
     assert st == {"memory": "not_configured", "network": "disabled", "video": "disabled", "input": "disabled"}
+
+
+def test_video_with_no_frames_is_not_ok(tmp_path, monkeypatch):
+    # Seen on CI: capture stalled for the whole session, yet the stream said "ok count=0".
+    from gamerec.video.recorder import ScreenRecorder
+
+    rec = ScreenRecorder(fps=15, region=(0, 0, 64, 64))
+    monkeypatch.setattr(rec, "setup", lambda: None)
+    monkeypatch.setattr(rec, "run", lambda: rec._stop.wait())
+    s = Session(TARGET, [rec], root=tmp_path)
+    s.start()
+    s.stop()
+    assert rec.status == "error" and "no frames" in rec.error
+
+
+def test_stills_by_time_and_events(tmp_path):
+    """Stills: one per second + one per key/mouse press and marker, mapped to the right frame."""
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+
+    from gamerec.video.stills import extract_stills
+
+    (tmp_path / "video").mkdir()
+    (tmp_path / "input").mkdir()
+    w = cv2.VideoWriter(str(tmp_path / "video/screen.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 10, (320, 180))
+    rows = ["frame,t_ns,left,top,width,height,source,dup"]
+    for i in range(30):                                   # 3 s at 10 fps; brightness = frame number
+        w.write(np.full((180, 320, 3), i * 8, np.uint8))
+        rows.append(f"{i},{i * 100_000_000},0,0,320,180,window,0")
+    w.release()
+    (tmp_path / "video/frames.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    ev = [{"t_ns": 1_250_000_000, "kind": "mouse_down", "button": "left", "x": 5, "y": 6},
+          {"t_ns": 1_300_000_000, "kind": "key_down", "key": "q"},              # < 0.15 s later: skipped
+          {"t_ns": 2_050_000_000, "kind": "key_down", "key": "w", "repeat": True},  # auto-repeat: skipped
+          {"t_ns": 2_500_000_000, "kind": "key_up", "key": "e"}]
+    (tmp_path / "input/events.jsonl").write_text("\n".join(json.dumps(e) for e in ev), encoding="utf-8")
+    (tmp_path / "markers.jsonl").write_text(json.dumps({"t_ns": 2_710_000_000, "label": "boss"}), encoding="utf-8")
+    n = extract_stills(tmp_path, 2.9)
+    import csv
+
+    idx = list(csv.DictReader((tmp_path / "stills/index.csv").open(encoding="utf-8")))
+    assert n == len(idx) == 5
+    assert [r["reason"] for r in idx] == ["every_1s", "every_1s", "mouse_down", "every_1s", "marker"]
+    assert [int(r["video_frame"]) for r in idx] == [0, 10, 12, 20, 27]
+    assert idx[2]["detail"] == "left@5,6" and idx[4]["detail"] == "boss"
+    img = cv2.imread(str(tmp_path / "stills" / idx[2]["file"]))
+    assert img.shape[1] == 480 and abs(int(img.mean()) - 12 * 8) <= 6

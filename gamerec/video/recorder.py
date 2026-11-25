@@ -11,7 +11,7 @@ from ..recorder import Recorder
 class ScreenRecorder(Recorder):
     kind = "video"
 
-    def __init__(self, fps: float = 15.0, scale: float = 0.75, region: tuple[int, int, int, int] | None = None) -> None:
+    def __init__(self, fps: float = 8.0, scale: float = 0.5, region: tuple[int, int, int, int] | None = None) -> None:
         super().__init__()
         self.fps = fps
         self.scale = scale
@@ -97,3 +97,6 @@ class ScreenRecorder(Recorder):
             self._writer.release()
         if getattr(self, "_fh", None):
             self._fh.close()
+        if self.count == 0 and self.status == "running":
+            # an empty video must not be reported as "ok"
+            raise RuntimeError("no frames were captured (screen capture stalled or failed)")

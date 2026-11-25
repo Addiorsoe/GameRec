@@ -15,8 +15,8 @@ def make_recorders(
     video: bool = True,
     inputs: bool = True,
     rate_hz: float = 30.0,
-    fps: float = 15.0,
-    scale: float = 0.75,
+    fps: float = 8.0,
+    scale: float = 0.5,
     iface: str | None = None,
 ) -> list[Recorder]:
     recs: list[Recorder] = []

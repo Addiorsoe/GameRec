@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -19,7 +20,7 @@ from .env_dialog import EnvDialog
 from .hotkey_dialog import HotkeyDialog
 from ..export import export_session
 from ..memory.watcher import WatchEntry, load_watchlist
-from ..process import TargetInfo, get_target, list_processes, target_from_foreground
+from ..process import TargetInfo, find_target_by_name, get_target, list_processes, target_from_foreground
 from ..session import Session, next_take
 
 TYPES = ["int32", "uint32", "int16", "int64", "float", "double", "uint8", "bytes:16"]
@@ -41,6 +42,8 @@ class App(ttk.Frame):
         self._hk_paused = False
         self._busy = False  # True while starting/stopping: hotkeys must not re-enter
         self._empty_watch_ok = False  # user confirmed recording without memory values this run
+        self._segment = 0  # segment number within an automatically split recording
+        self._exports = 0  # background exports still running
         self.locked: TargetInfo | None = None  # set by the lock-target hotkey
         self.hk_config = HotkeyConfig(path=default_output_dir().parent / "hotkeys.json")
         master.title(f"GameRec {__version__}  記憶體 / 封包 / 畫面記錄器")
@@ -52,6 +55,7 @@ class App(ttk.Frame):
         self.refresh_processes()
         self._start_hotkeys()
         self.after(300, self.check_environment)
+        self.after(1000, self._auto_lock)
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -98,7 +102,7 @@ class App(ttk.Frame):
         ttk.Checkbutton(opt, text="封包", variable=self.v_net).grid(row=0, column=0)
         ttk.Checkbutton(opt, text="錄影", variable=self.v_vid).grid(row=0, column=1)
         ttk.Checkbutton(opt, text="鍵鼠輸入", variable=self.v_inp).grid(row=0, column=2)
-        self.v_rate, self.v_fps, self.v_scale = tk.DoubleVar(value=30), tk.DoubleVar(value=15), tk.DoubleVar(value=0.75)
+        self.v_rate, self.v_fps, self.v_scale = tk.DoubleVar(value=30), tk.DoubleVar(value=8), tk.DoubleVar(value=0.5)
         for i, (lbl, var) in enumerate((("記憶體 Hz", self.v_rate), ("FPS", self.v_fps), ("縮放", self.v_scale))):
             ttk.Label(opt, text=lbl).grid(row=0, column=3 + i * 2, padx=(10, 2))
             ttk.Entry(opt, textvariable=var, width=6).grid(row=0, column=4 + i * 2)
@@ -123,7 +127,13 @@ class App(ttk.Frame):
         ttk.Label(rec, text="組別").grid(row=0, column=0, sticky="w")
         self.group_var = tk.StringVar()
         ttk.Combobox(rec, textvariable=self.group_var, values=GROUPS, width=8).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Label(rec, text="檔名會加上組別與流水號，例如 _A-03_", foreground="#555").grid(row=0, column=2, columnspan=2, sticky="w")
+        ttk.Label(rec, text="檔名會加上組別與流水號，例如 _A-03_", foreground="#555").grid(row=0, column=2, sticky="w")
+        sp = ttk.Frame(rec)
+        sp.grid(row=0, column=3, sticky="e")
+        ttk.Label(sp, text="連續錄製時每").pack(side="left")
+        self.v_split = tk.DoubleVar(value=2)
+        ttk.Entry(sp, textvariable=self.v_split, width=4).pack(side="left", padx=2)
+        ttk.Label(sp, text="分鐘自動切一個檔（0＝不切）").pack(side="left")
         ttk.Label(rec, text="備註").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.notes_var = tk.StringVar()
         ttk.Entry(rec, textvariable=self.notes_var).grid(row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
@@ -198,6 +208,28 @@ class App(ttk.Frame):
         except Exception as e:  # noqa: BLE001
             self.status.set(f"無法列出程式：{e}")
 
+    def _last_target_path(self) -> Path:
+        return default_output_dir().parent / "last_target.json"
+
+    def _auto_lock(self) -> None:
+        """Lock the game locked last time as soon as its window exists (checked every 3 s until locked)."""
+        if self.locked:
+            return
+        try:
+            name = json.loads(self._last_target_path().read_text(encoding="utf-8")).get("name", "")
+        except (OSError, ValueError):
+            return  # never locked anything: keep the manual hint
+        recording = self.session and self.session.started and not self.session.stopped
+        if name and not recording and sys.platform == "win32":
+            try:
+                t = find_target_by_name(name)
+            except Exception:  # noqa: BLE001 - not running (yet)
+                t = None
+            if t and t.hwnd:
+                self._set_locked(t, auto=True)
+                return
+        self.after(3000, self._auto_lock)
+
     def lock_foreground(self) -> None:
         """Lock the target to the window that currently has focus (hotkey)."""
         if self.session and self.session.started and not self.session.stopped:
@@ -212,10 +244,20 @@ class App(ttk.Frame):
         if t.pid == os.getpid():
             self.status.set(f"請先點一下遊戲視窗，再按 {pretty(self.hk_config.bindings['lock_target'])}")
             return
+        self._set_locked(t)
+
+    def _set_locked(self, t: TargetInfo, auto: bool = False) -> None:
         self.locked = t
         self.proc_var.set(f"{t.name}  [{t.pid}]")
-        self.lock_var.set(f"🔒 已鎖定：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
+        how = "（自動鎖定上次的遊戲）" if auto else ""
+        self.lock_var.set(f"🔒 已鎖定{how}：{t.name} [{t.pid}]｜視窗「{t.window_title}」（錄影只錄這個視窗）")
         self.status.set(f"已鎖定 {t.name}")
+        try:
+            p = self._last_target_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"name": t.name}), encoding="utf-8")
+        except OSError:
+            pass
         try:
             self.master.bell()
         except tk.TclError:
@@ -315,8 +357,9 @@ class App(ttk.Frame):
                 json.dump([w.to_dict() for w in self.watch], f, indent=2, ensure_ascii=False)
 
     # -------------------------------------------------------------- session
-    def start(self) -> None:
-        if self._busy or (self.session and self.session.started and not self.session.stopped):
+    def start(self, continued: bool = False) -> None:
+        """continued=True: next segment of an automatically split recording (no prompts)."""
+        if not continued and (self._busy or (self.session and self.session.started and not self.session.stopped)):
             return
         if self.locked:
             import psutil
@@ -358,17 +401,18 @@ class App(ttk.Frame):
                 self.status.set("已取消：請先新增監看位址或匯入 JSON")
                 return
             self._empty_watch_ok = True
-        if self.v_net.get() and not npcap_installed():
+        if self.v_net.get() and not npcap_installed() and not continued:
             messagebox.showwarning("Npcap", "未安裝 Npcap，這次將不會記錄封包。")
         group = self.group_var.get().strip()
         take = next_take(self.out_var.get(), group) if group else None
-        if self.last_zip is not None and self.notes_var.get() == self._saved_notes:
+        if not continued and self.last_zip is not None and self.notes_var.get() == self._saved_notes:
             self.notes_var.set("")  # the previous segment's note is already saved with it
+        self._segment = self._segment + 1 if continued else 1
         self.session = Session(target, recs, root=self.out_var.get(), group=group, take=take)
         self.session.start()
         self.b_notes["state"] = "disabled"
         self.b_start["state"], self.b_mark["state"], self.b_stop["state"] = "disabled", "normal", "normal"
-        self._tick()
+        self._tick(self.session)
 
     # -------------------------------------------------------------- hotkeys
     def _start_hotkeys(self) -> None:
@@ -391,6 +435,11 @@ class App(ttk.Frame):
             self.after(50, self._poll_hotkeys)
 
     def handle_hotkey(self, action: str) -> None:
+        if action.startswith(("exported:", "export_failed:")):  # background export of a split segment
+            self._exports -= 1
+            kind, _, text = action.partition(":")
+            self.last_var.set(f"上一段（自動切檔）：{text}" if kind == "exported" else f"自動切檔的匯出失敗：{text}")
+            return
         if self._busy:  # a stop/export dialog is open: ignore (prevents nested stop/start)
             return
         recording = bool(self.session and self.session.started and not self.session.stopped)
@@ -420,14 +469,48 @@ class App(ttk.Frame):
         self._hk_dlg = HotkeyDialog(self.master, self.hk_config, on_change=self._label_hotkeys,
                                     on_capture=lambda on: setattr(self, "_hk_paused", on))
 
-    def _tick(self) -> None:
-        s = self.session
-        if not s or s.stopped:
-            return
+    def _tick(self, s=None) -> None:
+        if not s or s is not self.session or s.stopped:
+            return  # one loop per session
         secs = s.clock.now_ns() / 1e9
+        try:
+            split = self.v_split.get() * 60
+        except tk.TclError:
+            split = 0
+        if split > 0 and secs >= split and not self._busy:
+            self._auto_split()
+            return
         parts = [f"{k}:{st} {n}" for k, (st, n) in s.stats().items()]
-        self.status.set(f"錄製中 {secs:6.1f}s ｜ " + " ｜ ".join(parts) + f" ｜ 標記 {len(s.markers)}")
-        self.after(500, self._tick)
+        seg = f"第 {self._segment} 段 " if self._segment > 1 or split > 0 else ""
+        self.status.set(f"錄製中 {seg}{secs:6.1f}s ｜ " + " ｜ ".join(parts) + f" ｜ 標記 {len(s.markers)}")
+        self.after(500, self._tick, s)
+
+    def _segment_notes(self, notes: str, seg: int, more: bool) -> str:
+        if seg == 1 and not more:
+            return notes
+        tag = f"（連續錄製第 {seg} 段" + ("，時間到自動切檔）" if more else "，最後一段）")
+        return (notes + " " if notes else "") + tag
+
+    def _auto_split(self) -> None:
+        """Time limit reached: start the next segment at once, export the finished one in the background."""
+        old, seg, notes = self.session, self._segment, self.notes_var.get().strip()
+        self._busy = True
+        try:
+            old.stop()
+            self.start(continued=True)
+        finally:
+            self._busy = False
+        self._exports += 1
+
+        def work():
+            try:
+                z = export_session(old, notes=self._segment_notes(notes, seg, True))
+                self._hotkeys.put(f"exported:{z.name}")
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger("gamerec").exception("export of split segment failed")
+                self._hotkeys.put(f"export_failed:{e}")
+
+        threading.Thread(target=work, daemon=False).start()  # non-daemon: exit waits for the zip
 
     def mark(self) -> None:
         now = time.monotonic()
@@ -448,7 +531,7 @@ class App(ttk.Frame):
             self.session.stop()
             self.status.set("已停止，正在匯出…")
             self.update_idletasks()
-            notes = self.notes_var.get().strip()
+            notes = self._segment_notes(self.notes_var.get().strip(), self._segment, False)
             if forced:
                 notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
             zpath = export_session(self.session, notes=notes)
@@ -465,7 +548,7 @@ class App(ttk.Frame):
         """Rewrite the last segment's zip with the note typed afterwards."""
         if self._busy or not self.session or not self.session.stopped or self.last_zip is None:
             return
-        notes = self.notes_var.get().strip()
+        notes = self._segment_notes(self.notes_var.get().strip(), self._segment, False)
         if self.session.notes.endswith("（使用強制停止鍵結束）"):
             notes = (notes + " " if notes else "") + "（使用強制停止鍵結束）"
         self.last_zip = export_session(self.session, out_dir=self.last_zip.parent, notes=notes)
