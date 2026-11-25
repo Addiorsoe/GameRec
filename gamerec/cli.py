@@ -5,6 +5,7 @@ import argparse
 import signal
 import sys
 import threading
+import time
 
 from . import __version__
 
@@ -41,8 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "ps":
         from .process import list_processes
 
-        for pid, name in list_processes():
-            print(f"{pid:>7}  {name}")
+        try:
+            for pid, name in list_processes():
+                print(f"{pid:>7}  {name}")
+        except BrokenPipeError:  # e.g. piped into `head`
+            pass
         return 0
     return _record(args)
 
@@ -67,7 +71,10 @@ def _record(args) -> int:
     for kind, (status, _) in s.stats().items():
         print(f"[{kind}] {status}")
     print(f"錄製中：{target.name} (pid {target.pid})，按 Ctrl+C 停止")
-    done.wait(args.seconds or None)
+    # Wait in short slices: a bare Event.wait() cannot be interrupted by Ctrl+C on Windows.
+    deadline = time.monotonic() + args.seconds if args.seconds else None
+    while not done.is_set() and (deadline is None or time.monotonic() < deadline):
+        done.wait(0.25)
     z = export_session(s, notes=args.notes)
     for kind, (status, count) in s.stats().items():
         print(f"[{kind}] {status} {count}")

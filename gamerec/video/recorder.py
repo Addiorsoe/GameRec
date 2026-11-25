@@ -31,8 +31,15 @@ class ScreenRecorder(Recorder):
         import mss  # noqa: PLC0415
 
         self._cv2 = cv2
+        self._mss = mss
+        # mss handles are tied to the creating thread on some versions (Windows GDI),
+        # so this one is only used to size the video; run() opens its own.
         self._sct = mss.mss()
-        left, top, w, h = self._grab_region()
+        try:
+            left, top, w, h = self._grab_region()
+        finally:
+            self._sct.close()
+            self._sct = None
         self._size = (max(2, int(w * self.scale)) // 2 * 2, max(2, int(h * self.scale)) // 2 * 2)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self._writer = cv2.VideoWriter(str(self.path("video/screen.mp4")), fourcc, self.fps, self._size)
@@ -47,6 +54,7 @@ class ScreenRecorder(Recorder):
         import numpy as np
 
         cv2 = self._cv2
+        self._sct = self._mss.mss()
         period = 1.0 / self.fps
         next_t = time.perf_counter()
         while not self.stopping:

@@ -123,3 +123,52 @@ def test_packet_direction():
     assert pc.classify("tcp", 443, 50000) == "in"
     assert pc.classify("udp", 6000, 9999) == "out"
     assert pc.classify("tcp", 6000, 9999) is None
+
+
+class _FakeSniffer:
+    """Stands in for scapy.AsyncSniffer: fails in its thread when a BPF filter is given."""
+
+    fail_always = False
+
+    def __init__(self, filter=None, **_kw):
+        import threading
+
+        self.filter = filter
+        self.exception = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self._stop = threading.Event()
+
+    def _run(self):
+        if self.filter or self.fail_always:
+            self.exception = RuntimeError("libpcap is not available")
+            return
+        self._stop.wait()
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+
+def _run_capture(tmp_path, monkeypatch, fail_always):
+    import scapy.all
+
+    monkeypatch.setattr(_FakeSniffer, "fail_always", fail_always)
+    monkeypatch.setattr(scapy.all, "AsyncSniffer", _FakeSniffer)
+    pc = PacketCapture(ports_fn=lambda pid: set())
+    s = Session(TARGET, [pc], root=tmp_path)
+    s.start()
+    s.stop()
+    return pc
+
+
+def test_capture_falls_back_without_bpf(tmp_path, monkeypatch):
+    pc = _run_capture(tmp_path, monkeypatch, fail_always=False)
+    assert pc.status == "ok" and pc.extra["bpf"] is None
+
+
+def test_capture_reports_dead_sniffer(tmp_path, monkeypatch):
+    # Before the fix a sniffer that died in its thread was reported as "ok" with 0 packets.
+    pc = _run_capture(tmp_path, monkeypatch, fail_always=True)
+    assert pc.status == "unavailable" and "sniffer" in pc.error

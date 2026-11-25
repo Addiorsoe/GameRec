@@ -1,16 +1,57 @@
-# 自動跑圖／刷圖（AutoFarm）完整設計
+# 自動巡路／刷圖完整設計（兩個獨立程式）
 
-> 本文件延續 `docs/ARCHITECTURE.md`（GameRec 記錄工具），說明從「採集資料」到「自動跑圖刷圖可實際使用」的完整流程、需求、資料標記規格、分析管線、Bot 架構，以及**隨遊戲更新維護**的方法。
+> 本文件延續 `docs/ARCHITECTURE.md`，說明從「採集資料」到「自動跑圖刷圖可實際使用」的完整流程、需求、資料標記規格、分析管線、巡路腳本架構，以及**隨遊戲更新維護**的方法。
 >
 > ⚠️ 對線上遊戲使用自動化腳本通常違反服務條款，可能封號。本設計以單機、自架私服或測試帳號為前提；**不包含**任何繞過或隱藏於反外掛偵測的設計。
 
 ---
 
-## 0. 總覽
+## 0. 兩個程式的分工
+
+本專案是**兩個獨立程式**，各自打包成自己的 exe，可以分開安裝、分開更新。兩者之間只透過「檔案」溝通，不互相 import 對方的程式碼：
+
+| | **程式一：GameRec 監控軟體** | **程式二：AutoPath 自動巡路腳本** |
+|---|---|---|
+| 用途 | 指定一個程式，監測並錄下它的記憶體位址、封包、畫面、鍵鼠輸入與標記 | 讀 GameRec 的錄製結果做分析，建立地圖與遊戲設定檔，然後自動巡路／刷圖 |
+| 對遊戲的動作 | **只讀**（讀記憶體、被動抓封包、截圖） | 只讀記憶體＋送出一般鍵鼠輸入 |
+| 輸入 | 目標程式、監看清單（可直接使用 profile 的 `memory.yaml`） | GameRec 匯出的 `session_*.zip`、`profiles/<game>/` |
+| 輸出 | `session_*.zip`（manifest + 各串流 + 標記） | `profiles/<game>/`（地圖、opcode 表、路線）、`bot_log.jsonl`、分析報告 |
+| exe | `GameRec.exe` | `AutoPath.exe` |
+| 程式碼 | `gamerec/`（現有） | `autopath/`（新增） |
 
 ```
- ┌─────────── 階段 A：採集 ───────────┐   ┌──── 階段 B：分析 ────┐   ┌──── 階段 C：自動化 ────┐
- GameRec 錄製（記憶體/封包/影片/輸入）    gamerec-analyze           gamerec-bot
+ ┌────────────── 程式一：GameRec ──────────────┐            ┌──────────── 程式二：AutoPath ────────────┐
+ │ 監測記憶體 / 封包 / 錄影 / 輸入 / 標記       │  session   │ 分析模式：對齊 → 關聯 → 欄位推斷 → 建地圖   │
+ │ 版本指紋、自動動作標記、事後標記             │ ──zip────► │ 設定檔工具：AOB 重掃 / 產生簽章 / 回歸測試   │
+ └─────────────────────▲───────────────────────┘            │ 巡路模式：感知 → 狀態機 → A* → 鍵鼠輸入     │
+                       │  profiles/<game>/memory.yaml        └───────────────┬──────────────────────────┘
+                       └────────（監看清單共用同一份位址定義）◄──────────────┘
+                     AutoPath 執行時也可以呼叫 GameRec CLI 同步錄影，當作除錯與回歸資料
+```
+
+**共用的只有規格與一個小型函式庫** `gamecommon/`：session 格式讀寫、記憶體型別解碼、AOB 簽章解析、profile 讀取。兩個程式都依賴它，但彼此獨立。這樣的好處：
+
+- GameRec 可以單獨用在任何遊戲或程式的觀察，不受巡路功能影響。
+- AutoPath 更新（新地圖、新戰鬥邏輯）不需要重新發佈 GameRec，反之亦然。
+- 規格（`format_version`、profile schema）是兩者之間的合約，改版時兩邊都要相容舊版本。
+
+### 0.1 需求追蹤（所有要求都對應到哪裡）
+
+| 使用者要求 | 負責的程式 | 本文件章節 |
+|---|---|---|
+| 指定監測某個程式的記憶體與封包 | GameRec | ARCHITECTURE.md §3、本文件 §3 |
+| 錄影並記錄分析指定的記憶體位址與封包效果 | GameRec（錄製）＋ AutoPath（分析） | ARCHITECTURE.md §2、§4；本文件 §4 |
+| 用以上分析結果製作自動巡路 | AutoPath | §5、§6.3 |
+| 自動跑圖刷圖 | AutoPath | §6（狀態機、戰鬥、撿物） |
+| 盡可能採集封包與動作的關聯，並打上標記方便寫腳本 | GameRec（標記）＋ AutoPath（關聯分析） | §3、§4 步驟 2～5 |
+| 從開始到投入使用的完整流程與需求 | 兩者 | §1、§2 |
+| 隨遊戲更新一併更新或方便維護 | 兩者（共用 profile） | §5、§7 |
+
+## 0.2 總覽
+
+```
+ ┌──── 階段 A：採集（GameRec）────┐   ┌─ 階段 B：分析（AutoPath）─┐   ┌ 階段 C：自動化（AutoPath）┐
+ GameRec 錄製（記憶體/封包/影片/輸入）    autopath analyze           autopath run
    + 動作標記（自動 + 手動）       ──►   對齊 → 事件切分 → 關聯   ──►  感知 → 狀態機 → 行動
    + 遊戲版本指紋                       → 封包欄位推斷 → 地圖建置       → A* 尋路 → 戰鬥/撿物迴圈
                                         → 產出 game profile          → 安全停止 / 紀錄
@@ -31,7 +72,7 @@
 | **P2** | 標記式錄製 | 10～30 段已標記的 session（走路、攻擊、施法、撿物、換圖、死亡、回城） | 每類動作至少 20 次樣本；manifest 含版本指紋 |
 | **P3** | 封包／動作關聯分析 | `profiles/<game>/packets.yaml`：opcode 對照表與欄位定義；`analysis_report.md` | 主要動作（移動、攻擊、撿物）的 opcode 信心度 ≥ 0.9 |
 | **P4** | 地圖建置 | `profiles/<game>/maps/<map_id>.json`：可走格網、傳送點、刷怪區、路點 | 在該地圖由錄製軌跡覆蓋 ≥ 80% 可走區 |
-| **P5** | Bot 原型（只觀察） | `gamerec-bot --dry-run`：只讀狀態、規劃路徑、顯示「打算做什麼」，不送出輸入 | 狀態判讀與畫面一致率 ≥ 95% |
+| **P5** | Bot 原型（只觀察） | `autopath run --dry-run`：只讀狀態、規劃路徑、顯示「打算做什麼」，不送出輸入 | 狀態判讀與畫面一致率 ≥ 95% |
 | **P6** | Bot 原型（閉環） | 用**模擬鍵鼠輸入**走路、打怪、撿物 | 指定地圖連續跑 30 分鐘無卡死，卡住能自動脫困 |
 | **P7** | 穩定化 | 例外處理、死亡/背包滿/斷線處理、看門狗、完整紀錄 | 連續 4 小時無人工介入；所有停止原因皆有紀錄 |
 | **P8** | 投入使用＋維護 | 版本偵測、簽章重掃工具、回歸測試、更新 SOP | 遊戲更新後依 SOP 在 1 小時內恢復 |
@@ -144,7 +185,7 @@ events:      [mob_killed, item_dropped, item_looted, map_changed, player_died, l
 
 ---
 
-## 4. 分析管線（`gamerec-analyze`，新模組 `gamerec/analysis/`）
+## 4. 分析管線（AutoPath 分析模式：`autopath analyze`，模組 `autopath/analysis/`）
 
 ```
 session zip(s) ─► 1 載入與對齊 ─► 2 自動事件標記 ─► 3 封包分群 ─► 4 時間關聯
@@ -221,7 +262,7 @@ stop_after: {minutes: 120}
 
 ---
 
-## 6. Bot 架構（`gamerec-bot`，新模組 `gamerec/bot/`）
+## 6. 巡路腳本架構（AutoPath 巡路模式：`autopath run`，模組 `autopath/bot/`）
 
 ```
             ┌──────────────────── Bot 主迴圈（10～20Hz）────────────────────┐
@@ -236,7 +277,7 @@ stop_after: {minutes: 120}
  Action     │  InputDriver（SendInput 模擬鍵鼠；--dry-run 只記錄）           │
  (行動)      │  SafetyGuard：F12 停止、看門狗、速率限制、版本鎖               │
             ▼                                                               │
- Logging    │  bot_log.jsonl（決策/轉換/路徑）＋可同時啟動 GameRec 錄製      │
+ Logging    │  bot_log.jsonl（決策/轉換/路徑）＋可呼叫 GameRec CLI 同步錄製  │
             └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -317,14 +358,14 @@ LOOT.tick:
 - 啟動時計算 exe 版本與 SHA-256，與 profile 支援清單比對；不一致時提示「遊戲已更新」，Bot 進入鎖定，只允許錄製與分析。
 
 ### 7.2 位址：AOB 簽章自動重掃
-- `gamerec-profile rescan <game>`：對每個簽章重新掃描，回報「找到 1 個／找到多個／找不到」。
+- `autopath profile rescan <game>`：對每個簽章重新掃描，回報「找到 1 個／找到多個／找不到」。
 - 找到唯一一個 → 重新解析並執行 `validate`；通過則自動更新 `memory.yaml` 的 `game_versions`。
 - 找不到 → 自動產生**候選簽章**：用舊版本保存的「簽章周圍 64 bytes」做模糊比對（允許 ±N bytes 差異），列出相似度最高的位置給人工確認。
-- 產生簽章的工具（`gamerec-profile make-sig`）：從一個已知位址附近抓指令，把相對位址、立即數自動換成 `??`，並驗證在模組中唯一。
+- 產生簽章的工具（`autopath profile make-sig`）：從一個已知位址附近抓指令，把相對位址、立即數自動換成 `??`，並驗證在模組中唯一。
 - 每次通過的簽章結果與周圍 bytes 存入 `profiles/<game>/sigdb/<version>.json`，作為下次模糊比對依據。
 
 ### 7.3 封包：opcode 重新對應
-- `regression/` 中每個動作保留一段短錄製。更新後在新版本重錄同樣動作（照「控制變因」腳本做 1～2 分鐘），執行 `gamerec-analyze remap --old <舊 session> --new <新 session>`：依動作關聯與長度分佈自動配對舊 opcode → 新 opcode，產生差異報告。
+- `regression/` 中每個動作保留一段短錄製。更新後在新版本重錄同樣動作（照「控制變因」腳本做 1～2 分鐘），執行 `autopath analyze remap --old <舊 session> --new <新 session>`：依動作關聯與長度分佈自動配對舊 opcode → 新 opcode，產生差異報告。
 - 因為 Bot 主要靠記憶體與鍵鼠，封包變動通常**不會讓 Bot 失效**，只影響「動作確認」這個輔助功能；可先停用封包確認繼續運作。
 
 ### 7.4 回歸測試
@@ -336,8 +377,8 @@ LOOT.tick:
 
 ### 7.5 更新 SOP（目標 1 小時內恢復）
 
-1. 啟動 GameRec → 看到「版本不符」提示。
-2. `gamerec-profile rescan` → 大部分簽章自動通過。
+1. 啟動 GameRec 或 AutoPath → 看到「版本不符」提示。
+2. `autopath profile rescan` → 大部分簽章自動通過。
 3. 失敗的簽章：看候選清單 → 用掃描器確認 → `make-sig` 重建。
 4. 錄一段 2 分鐘的「標準動作腳本」→ `remap` 封包。
 5. 跑回歸測試 → 全部通過。
@@ -349,21 +390,44 @@ LOOT.tick:
 
 ---
 
-## 8. 程式模組規劃（新增）
+## 8. 程式模組規劃
+
+### 8.1 程式一：GameRec（`gamerec/`，在現有程式上擴充）
 
 | 模組 | 職責 | 主要套件 |
 |---|---|---|
-| `gamerec/annotate/auto.py` | 輸入/記憶體 → 自動標記 | 標準庫 |
+| `gamerec/annotate/auto.py` | 輸入/記憶體 → 自動動作標記，寫 `annotations.jsonl` | 標準庫 |
 | `gamerec/annotate/ui.py` | 事後標記視窗（影片＋時間軸） | tkinter, opencv |
-| `gamerec/fingerprint.py` | 遊戲版本指紋 | pefile（或 pywin32） |
-| `gamerec/profile/loader.py` | 讀 profile、解析 AOB、驗證 | pymem, PyYAML |
-| `gamerec/profile/sigtools.py` | 簽章掃描、產生、模糊比對 | 標準庫（必要時 capstone 反組譯） |
-| `gamerec/analysis/` | 對齊、分群、關聯、欄位推斷、地圖建置、報告 | pandas, numpy |
-| `gamerec/bot/world.py` | WorldState 讀取 | pymem |
-| `gamerec/bot/fsm.py` | 狀態機與各 Behavior | 標準庫 |
-| `gamerec/bot/nav.py` | A*、路點、平滑、脫困 | numpy |
-| `gamerec/bot/input.py` | SendInput 鍵鼠驅動、dry-run | pywin32 / ctypes |
-| `gamerec/bot/safety.py` | 停止熱鍵、看門狗、速率限制、版本鎖 | pynput |
+| `gamerec/fingerprint.py` | 遊戲版本指紋寫入 manifest | pefile（或 pywin32） |
+| `gamerec/memory/watcher.py` | 監看清單新增 `signature` 型位址（透過 gamecommon 解析） | pymem |
+| `gamerec/ui/app.py` | F5～F8 事件熱鍵、Ctrl+F9 區段、載入 profile 的 `memory.yaml` 當監看清單 | tkinter |
+
+### 8.2 程式二：AutoPath（`autopath/`，新增）
+
+| 模組 | 職責 | 主要套件 |
+|---|---|---|
+| `autopath/cli.py`、`autopath/ui/` | 三個模式：`analyze`、`profile`、`run`；GUI 先做「選 profile／路線 → dry-run → 開始／F12 停止」 | argparse, tkinter |
+| `autopath/analysis/` | 對齊、封包分群、時間關聯、欄位推斷、地圖建置、報告 | pandas, numpy |
+| `autopath/profile/sigtools.py` | 簽章重掃、產生、模糊比對、`remap` | 標準庫（必要時 capstone） |
+| `autopath/bot/world.py` | WorldState 讀取 | pymem |
+| `autopath/bot/fsm.py` | 狀態機與各 Behavior | 標準庫 |
+| `autopath/bot/nav.py` | A*、路點、平滑、脫困、地圖學習 overlay | numpy |
+| `autopath/bot/input.py` | SendInput 鍵鼠驅動、dry-run | ctypes |
+| `autopath/bot/safety.py` | F12 停止、看門狗、速率限制、版本鎖 | pynput |
+
+### 8.3 共用函式庫（`gamecommon/`，不是程式）
+
+| 模組 | 職責 |
+|---|---|
+| `gamecommon/session_format.py` | session zip 讀寫、`format_version` 相容處理 |
+| `gamecommon/memtypes.py` | 型別編解碼（由現在的 `gamerec/memory/types.py` 移過來） |
+| `gamecommon/aob.py` | AOB 簽章掃描與 RIP 相對位址解析 |
+| `gamecommon/profile.py` | profile 讀取與 `validate` |
+
+### 8.4 打包與發佈
+
+- 兩個 PyInstaller spec：`GameRec.exe`、`AutoPath.exe`，各自版本號、各自 Release。
+- 相容表寫在 README：AutoPath 版本 X 支援 session `format_version` 1～2、profile schema 1。
 
 新增套件引入前會檢查來源、授權、維護狀態與已知漏洞（PyYAML 須使用 `safe_load`，避免載入任意物件）。
 
@@ -384,7 +448,7 @@ LOOT.tick:
 
 ## 10. 建議下一步
 
-1. **M2.5（GameRec 擴充）**：實作 `annotations.jsonl`、自動標記器、`F5`～`F8` 事件熱鍵、版本指紋。（約 1～2 天）
+1. **M2.5（程式一 GameRec 擴充）**：實作 `annotations.jsonl`、自動標記器、`F5`～`F8` 事件熱鍵、版本指紋；抽出 `gamecommon/`。
 2. 使用者依 3.5 的建議錄 P2 資料，上傳 zip。
-3. **M3**：`gamerec-analyze` 步驟 1～4（關聯表）先做出來，再依結果做欄位推斷與地圖建置。
-4. **M4**：profile loader + AOB 工具，接著 Bot dry-run。
+3. **M3（程式二 AutoPath 骨架＋分析模式）**：`autopath analyze` 步驟 1～4（關聯表）先做出來，再做欄位推斷與地圖建置。
+4. **M4（AutoPath 設定檔工具＋巡路模式）**：profile loader、AOB 工具，接著 `autopath run --dry-run`，最後才開放實際輸入。

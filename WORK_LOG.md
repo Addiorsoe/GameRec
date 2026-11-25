@@ -1,13 +1,14 @@
 # 工作進度
 - 專案：GameRec / 自動跑圖刷圖
 - 最後更新：2026-11-25
-- 狀態：等待使用者審閱設計文件
+- 狀態：等待使用者審閱（設計文件已改為兩個程式；監控軟體試跑完成）
 
 ## 目標
 - 提出自動跑圖刷圖從開始到投入使用的完整設計流程與需求，並提供隨遊戲更新維護的方法。
 
 ## 進度
 - 已完成：`docs/AUTOFARM_DESIGN.md`（階段 P0～P8、功能/非功能需求、標記規格 v2、分析管線、profile 結構、Bot 架構、維護 SOP、風險）
+- 已完成（2026-11-25 第二輪）：設計改為兩個獨立程式（GameRec 監控 / AutoPath 巡路），加入需求追蹤表；GameRec 在 Linux + Xvfb 試跑 CLI 與 GUI，修正 4 個問題
 - 待處理：使用者確認設計後，實作 M2.5（結構化標記、自動標記器、版本指紋）
 
 ## 修改紀錄
@@ -15,10 +16,18 @@
 |---|---|---|
 | docs/AUTOFARM_DESIGN.md | 新增設計文件 | L0（僅文件） |
 | WORK_LOG.md | 新增進度紀錄 | L0 |
+| gamerec/net/capture.py | 抓包執行緒失敗時不再誤報 ok：啟動後檢查存活、BPF 失敗改用無過濾重試；Windows 改用檢查 Npcap DLL（原檢查永遠不會觸發） | L1 |
+| gamerec/video/recorder.py | mss 改在錄影執行緒內建立（舊版 mss 在 Windows 跨執行緒使用會出錯） | L1 |
+| gamerec/cli.py | Ctrl+C 在 Windows 可正常停止（不再無限等待）；`ps` 接 pipe 不報錯 | L1 |
+| gamerec/ui/app.py | 全域 F9 改經 queue 交給 GUI 執行緒（原本從 pynput 執行緒直接呼叫 tkinter）；FPS/Hz/縮放輸入驗證 | L1 |
+| tests/test_core.py | 新增 2 個抓包健康檢查測試 | L0 |
 
 ## 測試結果
-- 測試項目：無（僅文件，未改程式碼）
-- 結果：未執行
+- pytest：6/6 通過（Python 3.12 與 3.13）；新增的 2 個測試在修正前會失敗（已確認）
+- CLI 實跑（Linux, Xvfb, root）：對一個送 UDP 的程式錄 5 秒後 Ctrl+C → 封包 184、影片 53 幀、輸入 3 筆、zip 正常
+- GUI 實跑（Xvfb）：列程式、新增/錯誤位址、錯誤 FPS 被擋、開始、標記、模擬全域 F9、停止匯出 → 正常
+- 未驗證：Windows 上的 pymem 記憶體讀取、Npcap、視窗擷取、PyInstaller exe（雲端環境為 Linux）
+- 已知非致命：Linux loopback 每個封包會出現兩次（lo 介面特性）；Xvfb 下模擬的字母鍵未被記錄，F9 有記錄（推測為 Xvfb 鍵盤配置問題，未驗證）
 
 ## 資安與風險
 - 設計限定只讀記憶體＋一般鍵鼠輸入，不注入、不改封包、不含規避反外掛設計。
